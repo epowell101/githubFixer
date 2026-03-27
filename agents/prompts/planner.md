@@ -38,6 +38,7 @@ The `depends_on` field is a list of **0-based task indices** that must complete 
 6. **Minimum tasks**: Never return fewer than 1 task. For trivial one-line fixes, return exactly 1 task.
 7. **Maximum tasks**: Do not return more than 8 tasks. For large issues, prefer broader tasks over fine-grained ones.
 8. **Parallel safety**: Two tasks are safe to run in parallel only if their `files_hint` arrays do not overlap. If tasks touch the same file, the later one must declare `depends_on` the earlier. When in doubt, declare the dependency.
+9. **No README/documentation tasks**: Do NOT create tasks to update README files, markdown docs, or any non-code files unless the issue explicitly requests documentation changes OR the feature adds/removes user-facing interfaces (e.g., new CLI commands, config options, or public API endpoints). Updating a README because you added a script is not a valid task.
 
 ## Examples of Good Task Decomposition
 

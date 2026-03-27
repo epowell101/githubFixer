@@ -98,6 +98,7 @@ class ReviewResult:
     approved: bool        # True if verdict=APPROVED (warnings don't block)
     summary: str
     critical_issues: list[dict]  # only severity=critical items
+    checklist: list[dict] = field(default_factory=list)  # [{"criterion": "...", "passed": bool}]
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +245,18 @@ def _parse_linear_state(text: str) -> LinearState:
     )
 
 
+def _extract_checklist_section(text: str) -> str | None:
+    """Extract the '## Completion Checklist' section from coder output."""
+    marker = "## Completion Checklist"
+    start = text.find(marker)
+    if start == -1:
+        return None
+    # Find the next ## header after the checklist section (or end of string)
+    next_section = text.find("\n## ", start + len(marker))
+    section = text[start:next_section].strip() if next_section != -1 else text[start:].strip()
+    return section if section else None
+
+
 def _extract_modified_files(text: str) -> list[str]:
     """Extract file paths from a coder response's 'Modified Files' section."""
     files: list[str] = []
@@ -293,16 +306,30 @@ def _parse_reviewer_output(text: str) -> ReviewResult:
             data = json.loads(text[start:end])
             all_issues = data.get("issues", [])
             critical = [i for i in all_issues if i.get("severity") == "critical"]
+            checklist = data.get("checklist", [])
+            # Promote any failed checklist item not already covered in issues
+            existing_descriptions = {i.get("description", "").lower() for i in critical}
+            for item in checklist:
+                if not item.get("passed", True):
+                    criterion = item.get("criterion", "unknown criterion")
+                    if criterion.lower() not in existing_descriptions:
+                        critical.append({
+                            "severity": "critical",
+                            "file": "",
+                            "description": f"Acceptance criterion not met: {criterion}",
+                            "fix": f"Ensure the following criterion is fully satisfied: {criterion}",
+                        })
             approved = data.get("verdict") == "APPROVED" or not critical
             return ReviewResult(
                 approved=approved,
                 summary=data.get("summary", ""),
                 critical_issues=critical,
+                checklist=checklist,
             )
         except (json.JSONDecodeError, ValueError):
             pass
     # Fallback: if parsing fails, approve to avoid false blocks
-    return ReviewResult(approved=True, summary=text[:200], critical_issues=[])
+    return ReviewResult(approved=True, summary=text[:200], critical_issues=[], checklist=[])
 
 
 # --------------------------------------------------------------------------- #
@@ -948,6 +975,13 @@ class IssueWorkflow:
                     return True
                 task.modified_files = _extract_modified_files(result)
                 self.modified_files.extend(task.modified_files)
+                checklist = _extract_checklist_section(result)
+                if checklist and self.linear_issue_id:
+                    await self._run_linear_tracker(
+                        f"Operation F: Add progress comment.\n"
+                        f"Issue ID: {self.linear_issue_id}\n"
+                        f"Comment: 📋 **Task checklist — {task.title}**\n\n{checklist}"
+                    )
 
         # 5c — Mark all tasks Done (parallel)
         executed = [t for t in self.tasks if t.linear_id]
@@ -1042,6 +1076,19 @@ class IssueWorkflow:
         logger.info("[%s] Phase 5.6: Code review (cycle %d)", self._label, cycle)
         raw = await self._run_reviewer(self._prompt_review())
         result = _parse_reviewer_output(raw)
+
+        # Post reviewer checklist to Linear regardless of verdict
+        if result.checklist and self.linear_issue_id:
+            checklist_lines = "\n".join(
+                f"- {'[x]' if item.get('passed', True) else '[ ]'} {item.get('criterion', '')}"
+                for item in result.checklist
+            )
+            verdict_icon = "✅" if result.approved else "❌"
+            await self._run_linear_tracker(
+                f"Operation F: Add progress comment.\n"
+                f"Issue ID: {self.linear_issue_id}\n"
+                f"Comment: {verdict_icon} **Review checklist (cycle {cycle + 1})**\n\n{checklist_lines}"
+            )
 
         if result.approved:
             if self.linear_issue_id:
@@ -1231,8 +1278,11 @@ class IssueWorkflow:
             f"Files hint: {', '.join(task.files_hint) or 'see analysis'}\n"
             f"Acceptance criteria: {task.acceptance}\n\n"
             f"Local repo path: {self.repo_path}\n\n"
-            f"Implement this specific task only. Do NOT run git commands. "
-            f"Report all modified files at the end."
+            f"Implement this specific task only. Do NOT run git commands.\n\n"
+            f"Follow the output format in your instructions exactly: "
+            f"## Implementation Summary, ## Modified Files, ## Test Results, and "
+            f"## Completion Checklist (all implementation steps marked [x]/[ ] and "
+            f"each acceptance criterion marked [x]/[ ])."
         )
 
     def _prompt_run_tests(self) -> str:
@@ -1256,7 +1306,10 @@ class IssueWorkflow:
             f"{spec_section}\n"
             f"Modified files:\n{files_list}\n\n"
             f"Local repo path: {self.repo_path}\n\n"
-            f"Return ONLY the JSON result object — no preamble, no markdown."
+            f'Return ONLY a JSON object with these exact fields: "verdict" (APPROVED or NEEDS_CHANGES), '
+            f'"summary" (string), "checklist" (array of {{"criterion": "...", "passed": true/false}} — '
+            f"one entry per acceptance criterion from the spec), and "
+            f'"issues" (array). No preamble, no markdown fences.'
         )
 
     # ---------------------------------------------------------------------- #

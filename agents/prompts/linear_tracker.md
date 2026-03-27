@@ -147,11 +147,15 @@ Steps:
 Use `mcp__linear__list_issues` with:
 - `team`: the Linear team ID
 - `query`: `[Auto] #{github_issue_number}:`
+- `includeArchived`: `false`
 
-Search the results for an issue whose title matches the pattern `[Auto] #{github_issue_number}:` (e.g., `[Auto] #42:`).
+This returns only non-archived issues. Search the results for issues whose title matches the pattern `[Auto] #{github_issue_number}:` (e.g., `[Auto] #42:`).
 
-- **If not found:** return `{"found": false}` and stop.
-- **If found:** check the issue's `state.name`.
+- **If no matching issues found:** return `{"found": false}` and stop.
+- **If multiple matching issues found:** pick the one with the **most recent `createdAt` date** (i.e., the highest-numbered identifier / most recently created). Ignore all others.
+- **If exactly one matching issue found:** use it.
+
+Then check the selected issue's `state.name`:
   - If it is `"Archived"`, the issue is no longer active — return `{"found": false}` and stop so the orchestrator creates a fresh issue instead.
   - If it is `"Cancelled"` or `"Canceled"`, the issue was previously blocked — return `{"found": true, "blocked": true, "linear_issue_id": "<identifier>"}` and stop. The orchestrator will skip it without creating a duplicate.
   - If it is `"In Review"`, the issue may have an open PR. Fetch the PR URL: use `mcp__linear__get_issue` with `id` set to the identifier and scan the comments for one starting with `"PR opened:"`. Extract the URL if found, otherwise set it to `null`. Return `{"found": true, "in_review": true, "pr_url": "<url or null>", "linear_issue_id": "<identifier>"}` and stop.

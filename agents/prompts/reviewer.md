@@ -59,7 +59,17 @@ Check all five dimensions:
 - Approach diverges from what the spec seemed to imply, but the result is still correct and spec-compliant
 - Over-engineered for the stated problem — correct but more complexity than the task warranted
 
-### 4. Return ONLY the JSON result
+### 4. Check the acceptance criteria checklist
+
+If a Project Spec was provided, go through every acceptance criterion listed under "Acceptance Criteria". For each criterion, independently verify it against the code:
+- Mark `- [x]` if the criterion is fully satisfied by the changes
+- Mark `- [ ]` if it is not satisfied
+
+Any `- [ ]` criterion is a **critical issue** and must appear in `issues` with `"severity": "critical"`. The coder will be sent back to fix it.
+
+Also check the coder's "Completion Checklist" in its output (if present). If any implementation step or acceptance criterion is marked `- [ ]` there, treat that as a critical issue too.
+
+### 5. Return ONLY the JSON result
 
 Your response must be **only** the JSON object below — no preamble, no explanation, no markdown fences.
 
@@ -68,6 +78,10 @@ On approval:
 {
   "verdict": "APPROVED",
   "summary": "Changes correctly add the null guard in CartService.calculate() and include a regression test.",
+  "checklist": [
+    {"criterion": "null guard added in CartService.calculate()", "passed": true},
+    {"criterion": "regression test covers the null case", "passed": true}
+  ],
   "issues": []
 }
 ```
@@ -77,6 +91,9 @@ On approval with warnings (still approved — warnings don't block):
 {
   "verdict": "APPROVED",
   "summary": "Core fix is correct. Minor style note.",
+  "checklist": [
+    {"criterion": "null guard added", "passed": true}
+  ],
   "issues": [
     {
       "severity": "warning",
@@ -93,6 +110,10 @@ When changes need revision:
 {
   "verdict": "NEEDS_CHANGES",
   "summary": "The null guard is added but the edge case of empty string input is not handled, which the issue explicitly mentions.",
+  "checklist": [
+    {"criterion": "handle None input", "passed": true},
+    {"criterion": "handle empty string input", "passed": false}
+  ],
   "issues": [
     {
       "severity": "critical",
