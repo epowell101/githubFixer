@@ -730,11 +730,27 @@ class IssueWorkflow:
             await self._phase_create_sub_issues()
             await self._phase_execute_tasks_subset(fix_tasks)
 
+        # Refresh so reviewer receives an accurate file list after test fixes
+        self.modified_files = await self._get_modified_files_from_git()
         return await self._phase_test_and_remediate(cycle + 1)
 
-    async def _phase_review(self) -> bool:
-        """Review the implementation against the issue requirements. Returns True to proceed."""
-        logger.info("[%s] Phase 5.6: Code review", self._label)
+    async def _phase_review(self, cycle: int = 0) -> bool:
+        """Review the implementation against the issue requirements. Returns True to proceed.
+
+        Re-reviews after each round of coder fixes, up to settings.max_review_cycles.
+        """
+        if cycle >= settings.max_review_cycles:
+            if self.linear_issue_id:
+                await self._run_linear_tracker(
+                    f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
+                    f"Comment: ⚠️ Review issues unresolved after {settings.max_review_cycles} fix attempt(s)."
+                )
+            await self._phase_blocked(
+                f"Review issues unresolved after {settings.max_review_cycles} fix attempt(s)"
+            )
+            return False
+
+        logger.info("[%s] Phase 5.6: Code review (cycle %d)", self._label, cycle)
         raw = await self._run_reviewer(self._prompt_review())
         result = _parse_reviewer_output(raw)
 
@@ -746,13 +762,14 @@ class IssueWorkflow:
                 )
             return True
 
-        # Critical issues found — create fix tasks and apply them once
+        # Critical issues found — create fix tasks, apply them, then re-review
         logger.info("[%s] Phase 5.6: %d critical issue(s) found", self._label, len(result.critical_issues))
         if self.linear_issue_id:
             issues_list = "\n".join(f"- {i.get('description', '')}" for i in result.critical_issues)
             await self._run_linear_tracker(
                 f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                f"Comment: 🔍 Review found {len(result.critical_issues)} issue(s):\n{issues_list}"
+                f"Comment: 🔍 Review cycle {cycle + 1}/{settings.max_review_cycles} — "
+                f"{len(result.critical_issues)} issue(s):\n{issues_list}"
             )
 
         fix_tasks = [
@@ -776,9 +793,8 @@ class IssueWorkflow:
         if blocked:
             return False
 
-        # Refresh modified files after fixes
         self.modified_files = await self._get_modified_files_from_git()
-        return True  # one round of fixes — proceed to PR
+        return await self._phase_review(cycle + 1)
 
     async def _phase_execute_tasks_subset(self, tasks: list[Task]) -> bool:
         """Execute a specific subset of tasks (e.g. remediation fixes). Returns True if blocked."""

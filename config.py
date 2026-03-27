@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # How long (seconds) to allow planning phases (0.5-4) before timing out
     planning_timeout_seconds: int = 600  # 10 minutes
 
+    # Max fix-and-re-review cycles before blocking (mirrors test remediation cycles)
+    max_review_cycles: int = 2
+
 
 
 @lru_cache
