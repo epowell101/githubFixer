@@ -24,6 +24,9 @@ Use the `linear-tracker` agent. Provide:
 - Linear Team ID
 - Instruction: "Check if a Linear parent issue already exists for GitHub issue #{number} (Operation G). Return the full reconstruction JSON."
 
+**If `{"found": true, "in_review": true, ...}`:**
+- The issue already has a PR in review. Skip all phases and stop immediately — no further work needed for this run.
+
 **If `{"found": true, ...}`:**
 - Use the returned `linear_issue_id`, `linear_project_id`, `tasks`, and `pr_url` for all subsequent phases
 - Skip Phase 1
@@ -39,9 +42,18 @@ Use the `linear-tracker` agent. Provide:
 
 ---
 
-### Phase 1 — Create Linear parent issue
+### Phases 1 & 2 — Create Linear issue + Analyze codebase (run in parallel)
 
-**Skip if:** Phase 0.5 returned `found: true`.
+**PARALLEL STEP** — emit both calls in a single response when both phases need to run:
+
+- **Phase 1 skipped if:** Phase 0.5 returned `found: true`
+- **Phase 2 skipped if:** Phase 0.5 returned a non-empty tasks array
+
+If **both** need to run, emit the `linear-tracker` (Phase 1) and `codebase-analyzer` (Phase 2) tool_use blocks in the same response — they are fully independent.
+
+If **only one** needs to run, emit just that call.
+
+**Phase 1 — Create Linear parent issue**
 
 Use the `linear-tracker` agent. Provide:
 - GitHub issue title, body, number, URL
@@ -52,21 +64,17 @@ Use the `linear-tracker` agent. Provide:
 
 Record the returned `linear_issue_id` and `linear_project_id` for all subsequent phases.
 
----
-
-### Phase 2 — Analyze the codebase
-
-**Skip if:** Phase 0.5 returned a non-empty tasks array (tasks present means analysis was previously completed).
+**Phase 2 — Analyze the codebase**
 
 Use the `codebase-analyzer` agent. Provide:
 - Full issue title and body
 - Local repo path
 - Instruction: "Analyze the codebase and return a structured report identifying the relevant files, root cause, and proposed implementation approach."
 
-Then post a progress comment:
+After both results are back, post a progress comment:
 
 Use the `linear-tracker` agent:
-- Linear issue ID
+- Linear issue ID (from Phase 1 result or Phase 0.5)
 - Comment: "🔍 **Codebase analyzed.** Planning implementation tasks..."
 - Instruction: "Add this progress comment (Operation F)."
 
@@ -127,11 +135,11 @@ Tasks have a `depends_on` field listing the 0-based indices of tasks that must f
 
 Tasks with `status: "done"` are already complete — skip them, count them as satisfied dependencies.
 
+**5a. Mark ALL incomplete tasks In Progress (once, before any batches)** — **PARALLEL STEP**: In a single response, emit one `linear-tracker` tool_use block per task that is NOT `status: "done"` (no text between blocks). Each call: Operation E, set sub-issue to "In Progress". Wait for all results.
+
 **For each batch:**
 
-**5a. Mark all tasks In Progress (parallel)** — **PARALLEL STEP**: In a single response, emit one `linear-tracker` tool_use block per task in the batch (no text between blocks). Each call: Operation E, set sub-issue to "In Progress". Wait for all results.
-
-**5b. Implement all tasks (parallel)** — **PARALLEL STEP**: In a single response, emit one `coder` tool_use block per task in the batch (no text between blocks). Each coder call receives:
+**5b. Implement all tasks in batch (parallel)** — **PARALLEL STEP**: In a single response, emit one `coder` tool_use block per task in the batch (no text between blocks). Each coder call receives:
 - Full issue title and body
 - Codebase analysis (verbatim)
 - This task's title, description, files_hint, acceptance
@@ -142,9 +150,11 @@ If any coder reports it cannot implement → **Phase BLOCKED**.
 
 Accumulate modified files across all tasks.
 
-**5c. Mark all tasks Done (parallel)** — **PARALLEL STEP**: In a single response, emit one `linear-tracker` tool_use block per task in the batch (no text between blocks). Each call: Operation E, set sub-issue to "Done". Wait for all results.
+Then proceed to the next batch.
 
-Then proceed to the next batch. When all batches are done, proceed to Phase 5.5.
+**5c. Mark ALL tasks Done (once, after all batches complete)** — **PARALLEL STEP**: In a single response, emit one `linear-tracker` tool_use block per task that was executed (no text between blocks). Each call: Operation E, set sub-issue to "Done". Wait for all results.
+
+Then proceed to Phase 5.5.
 
 ---
 

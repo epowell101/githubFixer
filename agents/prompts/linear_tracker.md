@@ -151,7 +151,9 @@ Use `mcp__linear__list_issues` with:
 Search the results for an issue whose title matches the pattern `[Auto] #{github_issue_number}:` (e.g., `[Auto] #42:`).
 
 - **If not found:** return `{"found": false}` and stop.
-- **If found:** check the issue's `state.name`. If it is `"Cancelled"`, `"Canceled"`, or `"Archived"`, the issue is no longer active — return `{"found": false}` and stop so the orchestrator creates a fresh issue instead.
+- **If found:** check the issue's `state.name`.
+  - If it is `"Cancelled"`, `"Canceled"`, or `"Archived"`, the issue is no longer active — return `{"found": false}` and stop so the orchestrator creates a fresh issue instead.
+  - If it is `"In Review"`, the issue already has a PR in review — return `{"found": true, "in_review": true, "linear_issue_id": "<identifier>"}` and stop. The orchestrator will skip all phases.
 - **Otherwise:** record the issue's `id` (UUID), `identifier` (e.g., `MAN-42`), and `project.id`.
   - If `project.id` is present on the issue: record it as `linear_project_id`.
   - If `project.id` is absent (issue not linked to a project): use `mcp__linear__list_projects` with `query` set to the GitHub repo full name (e.g., `owner/repo`) to find the project. If a project with a matching name is found, record its `id` as `linear_project_id`. If no project is found, set `linear_project_id` to `null`.
