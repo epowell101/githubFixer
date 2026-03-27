@@ -27,7 +27,10 @@ Use the `linear-tracker` agent. Provide:
 **If `{"found": true, ...}`:**
 - Use the returned `linear_issue_id`, `linear_project_id`, `tasks`, and `pr_url` for all subsequent phases
 - Skip Phase 1
-- If `pr_url` is set → skip Phases 1–6, go directly to Phase 7
+- If `pr_url` is set → verify the PR is still open before treating it as complete:
+  - Run `gh pr view {pr_url} --json state --jq '.state'` (use the `github-submitter` agent or run it directly via Bash)
+  - If the result is `"OPEN"` → skip Phases 1–6, go directly to Phase 7
+  - If the result is `"CLOSED"` or `"MERGED"` (or the command errors) → treat `pr_url` as null and apply the rules below
 - If all tasks have `status: "done"` and `pr_url` is null → skip Phases 1–5, go to Phase 6
 - If some tasks are `"done"` and some are `"todo"` or `"in_progress"` → skip Phases 1–4, resume Phase 5 for incomplete tasks only
 - If tasks array is empty → skip Phase 1, proceed from Phase 2
