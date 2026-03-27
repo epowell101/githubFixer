@@ -23,7 +23,6 @@ Create a `.env` file in the project root:
 
 ```env
 # Required
-ANTHROPIC_API_KEY=sk-ant-...
 LINEAR_API_KEY=lin_api_...
 LINEAR_TEAM_ID=your-team-id
 
@@ -34,6 +33,8 @@ LINEAR_TEAM_ID=your-team-id
 # Optional — concurrency
 # MAX_CONCURRENT_ISSUES=3
 ```
+
+Claude authentication is handled through the Claude Code CLI — no API key needed here. Make sure you're logged in (`claude`) before running.
 
 To find your Linear Team ID: go to Linear → Settings → API → scroll to "Team IDs".
 
