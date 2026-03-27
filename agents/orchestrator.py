@@ -643,7 +643,11 @@ class IssueWorkflow:
 
         for task, result in zip(tasks_needing_id, results):
             task.linear_id = _extract_linear_id(result)
-            logger.info("[%s] Sub-issue '%s' → %s", self._label, task.title, task.linear_id)
+            if task.linear_id is None:
+                logger.warning("[%s] Failed to extract Linear ID for sub-issue '%s' from: %.200s",
+                               self._label, task.title, result)
+            else:
+                logger.info("[%s] Sub-issue '%s' → %s", self._label, task.title, task.linear_id)
 
     async def _phase_execute_tasks(self) -> bool:
         """Execute all tasks in dependency batches. Returns True if blocked."""
@@ -867,9 +871,27 @@ class IssueWorkflow:
         self.pr_url = _extract_pr_url(result)
         logger.info("[%s] PR URL: %s", self._label, self.pr_url)
 
+    async def _phase_reconcile_subtasks(self) -> None:
+        """Safety net: mark any lingering sub-tasks as Done before final update."""
+        pending = [t for t in self.tasks if t.linear_id and t.status != "done"]
+        if not pending:
+            return
+        logger.info("[%s] Reconcile: marking %d lingering sub-task(s) Done", self._label, len(pending))
+        await asyncio.gather(*[
+            self._run_linear_tracker(
+                f"Operation E: Update sub-issue status.\n"
+                f"Sub-issue identifier: {t.linear_id}\n"
+                f"New status: Done"
+            )
+            for t in pending
+        ])
+        for t in pending:
+            t.status = "done"
+
     async def _phase_final_linear_update(self) -> None:
         if not self.linear_issue_id:
             return
+        await self._phase_reconcile_subtasks()
         logger.info("[%s] Phase 7: Final Linear update", self._label)
         await self._run_linear_tracker(
             f"Operation B: Mark the Linear issue as In Review with the PR URL.\n\n"
