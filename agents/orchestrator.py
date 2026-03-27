@@ -496,24 +496,31 @@ class IssueWorkflow:
         await self._phase_create_sub_issues()
         logger.info("[%s] Planning complete: %d sub-issue(s) created in Linear", self._label, len(self.tasks))
 
-    async def execute(self) -> None:
-        """Run execution phases (5-7). Designed to run under a concurrency semaphore.
+    async def code(self) -> bool:
+        """Recover Linear state and run coding phase (phase 5).
 
-        Recovers Linear state (set by plan()) then implements, tests, reviews, and submits.
+        Returns True if the caller should stop (blocked, or workflow already
+        complete and PR is open). Returns False to signal that testing should
+        proceed next.
+
+        Designed to run under the coding concurrency semaphore. After it
+        returns False, the caller should release the coding semaphore and
+        acquire the (typically higher-limit) testing semaphore before calling
+        test_review_submit().
         """
-        logger.info("[%s] Starting execution: %s", self._label, self.event.title)
+        logger.info("[%s] Starting coding: %s", self._label, self.event.title)
 
         # Phase 0.5 — Recover state from Linear (written by plan())
         state = await self._phase_check_linear()
 
         if state.blocked:
-            logger.info("[%s] Blocked in Linear — skipping execution", self._label)
-            return
+            logger.info("[%s] Blocked in Linear — skipping coding", self._label)
+            return True
 
         if state.in_review and state.pr_url:
             if await self._pr_is_open(state.pr_url):
-                logger.info("[%s] PR %s still open — skipping execution", self._label, state.pr_url)
-                return
+                logger.info("[%s] PR %s still open — nothing to do", self._label, state.pr_url)
+                return True
             state = LinearState(found=False)
 
         if state.found:
@@ -527,25 +534,36 @@ class IssueWorkflow:
                     logger.info("[%s] PR open — jumping to Phase 7", self._label)
                     self.pr_url = state.pr_url
                     await self._phase_final_linear_update()
-                    return
+                    return True  # done
                 state.pr_url = None
 
-            if self.tasks and all(t.status == "done" for t in self.tasks):
-                logger.info("[%s] All tasks done — jumping to Phase 6", self._label)
-                await self._phase_submit_pr()
-                await self._phase_final_linear_update()
-                return
-
-        # Re-analyze codebase — execution needs fresh context for coder prompts
-        logger.info("[%s] Phase 2 (re-analyze): Refreshing codebase analysis for execution", self._label)
+        # Re-analyze codebase for coder/tester prompts
+        logger.info("[%s] Phase 2 (re-analyze): Refreshing codebase analysis", self._label)
         self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
 
-        # Phase 5 — Execute tasks in dependency batches
-        if await self._phase_execute_tasks():
-            return  # blocked
+        if self.tasks and all(t.status == "done" for t in self.tasks):
+            # Tasks were completed in a prior session — collect modified files and
+            # proceed to testing rather than skipping it.
+            logger.info("[%s] All tasks already done — skipping coding, proceeding to tests", self._label)
+            self.modified_files = await self._get_modified_files_from_git()
+            return False
 
-        # Refresh modified files from git (authoritative)
+        # Phase 5 — Execute coding tasks in dependency batches
+        if await self._phase_execute_tasks():
+            return True  # blocked
+
+        # Collect authoritative modified-files list from git
         self.modified_files = await self._get_modified_files_from_git()
+        return False
+
+    async def test_review_submit(self) -> None:
+        """Run tests, code review, and submit PR (phases 5.5, 5.6, 6, 7).
+
+        Expects code() to have already populated self.analysis and
+        self.modified_files. Designed to run under the testing concurrency
+        semaphore, which is typically higher-limit than the coding semaphore.
+        """
+        logger.info("[%s] Starting test+review+submit: %s", self._label, self.event.title)
 
         # Phase 5.5 — Test & remediate (uses dedicated tester agent)
         if not await self._phase_test_and_remediate():
@@ -560,6 +578,16 @@ class IssueWorkflow:
 
         # Phase 7 — Final Linear update
         await self._phase_final_linear_update()
+
+    async def execute(self) -> None:
+        """Run execution phases (5-7). Kept for backward compatibility.
+
+        For production use with separate coding/testing semaphores, prefer
+        run_issue_full() which manages semaphore handoff internally.
+        """
+        done = await self.code()
+        if not done:
+            await self.test_review_submit()
 
     async def run(self) -> None:
         """Full workflow: plan then execute. Kept for backward compatibility."""
@@ -955,6 +983,49 @@ class IssueWorkflow:
 # --------------------------------------------------------------------------- #
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
+
+async def run_issue_full(
+    event: "IssueEvent",
+    coding_semaphore: asyncio.Semaphore,
+    testing_semaphore: asyncio.Semaphore,
+) -> None:
+    """Primary entry point used by TaskRunner.
+
+    Keeps one workspace open for the full lifecycle and hands off between
+    semaphores at phase boundaries:
+
+      plan()              — no semaphore (runs immediately for all issues)
+      code()              — under coding_semaphore
+      test_review_submit() — under testing_semaphore (higher limit, runs as
+                             soon as a testing slot is free regardless of
+                             whether the coding slots are full)
+    """
+    logger.info(
+        "Starting full workflow for %s#%d: %s",
+        event.repo_full_name, event.number, event.title,
+    )
+    async with issue_workspace(event.repo_name, event.number, event.clone_url) as workspace_dir:
+        _write_security_settings(workspace_dir)
+        workflow = IssueWorkflow(event, workspace_dir)
+
+        # Planning: runs immediately, no throttle
+        await workflow.plan()
+
+        # Coding: throttled to max_concurrent_issues
+        async with coding_semaphore:
+            done = await workflow.code()
+
+        if done:
+            logger.info("Workflow complete (no testing needed) for %s#%d", event.repo_full_name, event.number)
+            return
+
+        # Testing + review + PR: separate, higher-limit throttle
+        # The coding slot was already released above so another issue can start coding.
+        async with testing_semaphore:
+            await workflow.test_review_submit()
+
+    logger.info("Workflow complete for %s#%d", event.repo_full_name, event.number)
+
 
 async def run_issue_planning(event: "IssueEvent") -> None:
     """Run planning phases only (0.5-4). No concurrency semaphore needed."""

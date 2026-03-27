@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     # Concurrency — direct Linear MCP supports concurrent connections
     max_concurrent_issues: int = 3
+    # Testers can run more broadly in parallel than coders (I/O-bound, not CPU-bound)
+    max_concurrent_testers: int = 5
 
     # How long (seconds) to allow a single issue workflow before timing out
     issue_timeout_seconds: int = 1800  # 30 minutes

@@ -13,9 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 class TaskRunner:
-    def __init__(self, max_concurrent: int | None = None) -> None:
-        limit = max_concurrent or settings.max_concurrent_issues
-        self._semaphore = asyncio.Semaphore(limit)
+    def __init__(
+        self,
+        max_concurrent: int | None = None,
+        max_concurrent_testers: int | None = None,
+    ) -> None:
+        coding_limit = max_concurrent or settings.max_concurrent_issues
+        testing_limit = max_concurrent_testers or settings.max_concurrent_testers
+        self._coding_semaphore = asyncio.Semaphore(coding_limit)
+        self._testing_semaphore = asyncio.Semaphore(testing_limit)
         self._active: dict[str, asyncio.Task] = {}
 
     async def dispatch(self, event: "IssueEvent") -> None:
@@ -32,38 +38,22 @@ class TaskRunner:
         self._active[key] = task
 
     async def _run(self, event: "IssueEvent", key: str) -> None:
-        from agents.orchestrator import run_issue_planning, run_issue_execution
+        from agents.orchestrator import run_issue_full
 
         try:
-            # Planning runs immediately — no semaphore — so all issues appear in
-            # Linear while execution is throttled.
-            try:
-                await asyncio.wait_for(
-                    run_issue_planning(event),
-                    timeout=settings.planning_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Issue %s planning timed out after %ds",
-                    key, settings.planning_timeout_seconds,
-                )
-            except Exception:
-                logger.exception("Unhandled error planning issue %s", key)
-
-            # Execution is throttled to max_concurrent_issues in parallel
-            async with self._semaphore:
-                try:
-                    await asyncio.wait_for(
-                        run_issue_execution(event),
-                        timeout=settings.issue_timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "Issue %s execution timed out after %ds",
-                        key, settings.issue_timeout_seconds,
-                    )
-                except Exception:
-                    logger.exception("Unhandled error executing issue %s", key)
+            await asyncio.wait_for(
+                run_issue_full(event, self._coding_semaphore, self._testing_semaphore),
+                # Total budget covers planning + coding + testing
+                timeout=settings.planning_timeout_seconds + settings.issue_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Issue %s timed out after %ds",
+                key,
+                settings.planning_timeout_seconds + settings.issue_timeout_seconds,
+            )
+        except Exception:
+            logger.exception("Unhandled error processing issue %s", key)
         finally:
             self._active.pop(key, None)
             logger.info("Finished processing issue %s", key)
