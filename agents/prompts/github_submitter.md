@@ -71,17 +71,7 @@ git remote show origin | grep "HEAD branch"
 ```
 and use that branch name instead.
 
-### 7. Comment the PR URL on the original issue
-
-```bash
-gh issue comment {issue_number} \
-  --repo {owner}/{repo} \
-  --body "🤖 Fix ready for review: {pr_url}"
-```
-
-This notifies anyone watching the issue the moment the PR is open.
-
-### 8. Return the PR URL
+### 7. Return the PR URL
 
 After `gh pr create` succeeds, it prints the PR URL. Return that URL so the orchestrator can pass it to the Linear tracker.
 

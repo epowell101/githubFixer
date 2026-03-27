@@ -167,19 +167,26 @@ For each sub-issue found, record:
 - "Done" / "Completed" → `"done"`
 - Anything else → `"todo"`
 
-**4. Return the reconstruction JSON:**
+**4. Check comments for PR URL:**
+
+Use `mcp__linear__get_issue` with `id` set to the parent issue identifier. Scan the returned comments for one whose body starts with `"PR opened:"`. If found, extract the full URL from that comment. If no such comment exists, set `pr_url` to `null`.
+
+**5. Return the reconstruction JSON:**
 
 ```json
 {
   "found": true,
   "linear_issue_id": "MAN-42",
   "linear_project_id": "<uuid or null>",
+  "pr_url": "https://github.com/owner/repo/pull/30",
   "tasks": [
     {"linear_id": "MAN-43", "title": "Fix null check", "description": "...", "status": "done"},
     {"linear_id": "MAN-44", "title": "Add regression test", "description": "...", "status": "todo"}
   ]
 }
 ```
+
+`pr_url` is `null` if no "PR opened:" comment was found.
 
 Return this JSON clearly on its own line so the orchestrator can parse it.
 
