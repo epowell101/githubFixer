@@ -32,23 +32,41 @@ class TaskRunner:
         self._active[key] = task
 
     async def _run(self, event: "IssueEvent", key: str) -> None:
-        async with self._semaphore:
+        from agents.orchestrator import run_issue_planning, run_issue_execution
+
+        try:
+            # Planning runs immediately — no semaphore — so all issues appear in
+            # Linear while execution is throttled.
             try:
-                from agents.orchestrator import run_issue_workflow
                 await asyncio.wait_for(
-                    run_issue_workflow(event),
-                    timeout=settings.issue_timeout_seconds,
+                    run_issue_planning(event),
+                    timeout=settings.planning_timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 logger.error(
-                    "Issue %s timed out after %ds — killing workflow",
-                    key, settings.issue_timeout_seconds,
+                    "Issue %s planning timed out after %ds",
+                    key, settings.planning_timeout_seconds,
                 )
             except Exception:
-                logger.exception("Unhandled error processing issue %s", key)
-            finally:
-                self._active.pop(key, None)
-                logger.info("Finished processing issue %s", key)
+                logger.exception("Unhandled error planning issue %s", key)
+
+            # Execution is throttled to max_concurrent_issues in parallel
+            async with self._semaphore:
+                try:
+                    await asyncio.wait_for(
+                        run_issue_execution(event),
+                        timeout=settings.issue_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Issue %s execution timed out after %ds",
+                        key, settings.issue_timeout_seconds,
+                    )
+                except Exception:
+                    logger.exception("Unhandled error executing issue %s", key)
+        finally:
+            self._active.pop(key, None)
+            logger.info("Finished processing issue %s", key)
 
     @property
     def active_count(self) -> int:

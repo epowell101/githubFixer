@@ -422,21 +422,98 @@ class IssueWorkflow:
     # Main run loop                                                            #
     # ---------------------------------------------------------------------- #
 
-    async def run(self) -> None:
-        logger.info("[%s] Starting workflow: %s", self._label, self.event.title)
+    async def plan(self) -> None:
+        """Run planning phases (0.5-4): Linear issue + analysis + task planning + sub-issues.
 
-        # Phase 0.5 — Check Linear for existing state
+        Designed to run without a concurrency semaphore so all incoming issues are
+        planned immediately and show up in Linear while execution is throttled.
+        """
+        logger.info("[%s] Starting planning: %s", self._label, self.event.title)
+
+        # Phase 0.5 — Check if already planned
         state = await self._phase_check_linear()
 
         if state.blocked:
-            logger.info("[%s] Previously blocked in Linear — skipping", self._label)
+            logger.info("[%s] Previously blocked — skipping planning", self._label)
             return
 
         if state.in_review and state.pr_url:
             if await self._pr_is_open(state.pr_url):
-                logger.info("[%s] PR %s still open — skipping", self._label, state.pr_url)
+                logger.info("[%s] PR already open — no planning needed", self._label)
                 return
-            # PR closed/merged — treat as fresh start
+
+        if state.found:
+            self.linear_issue_id = state.linear_issue_id
+            self.linear_project_id = state.linear_project_id
+            if state.tasks:
+                # Already planned and sub-issues created — nothing to do
+                logger.info(
+                    "[%s] Already planned with %d task(s) — skipping",
+                    self._label, len(state.tasks),
+                )
+                return
+
+        # Phase 1+2 — Create Linear issue + Analyze codebase (parallel when both needed)
+        need_linear = not state.found
+        if need_linear:
+            logger.info("[%s] Phase 1+2: Creating Linear issue + analyzing codebase in parallel", self._label)
+            linear_result, self.analysis = await asyncio.gather(
+                self._run_linear_tracker(self._prompt_create_linear_issue()),
+                self._run_codebase_analyzer(self._prompt_analyze_codebase()),
+            )
+            self.linear_issue_id = _extract_linear_id(linear_result)
+            self.linear_project_id = _extract_uuid(linear_result)
+            logger.info("[%s] Linear issue: %s", self._label, self.linear_issue_id)
+        else:
+            logger.info("[%s] Phase 2: Analyzing codebase", self._label)
+            self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
+
+        if self.linear_issue_id:
+            await self._run_linear_tracker(
+                f"Operation F: Add progress comment.\n"
+                f"Issue ID: {self.linear_issue_id}\n"
+                f"Comment: 🔍 **Codebase analyzed.** Planning implementation tasks..."
+            )
+
+        # Phase 3 — Plan
+        logger.info("[%s] Phase 3: Planning tasks", self._label)
+        plan_result = await self._run_planner(self._prompt_plan())
+        self.tasks = _parse_task_list(plan_result)
+
+        if self.tasks and self.tasks[0].description.startswith("AMBIGUOUS:"):
+            await self._phase_blocked(self.tasks[0].description)
+            return
+
+        if self.linear_issue_id:
+            task_list = "\n".join(f"{i+1}. {t.title}" for i, t in enumerate(self.tasks))
+            await self._run_linear_tracker(
+                f"Operation F: Add progress comment.\n"
+                f"Issue ID: {self.linear_issue_id}\n"
+                f"Comment: 📋 **Plan ready — {len(self.tasks)} tasks:**\n{task_list}"
+            )
+
+        # Phase 4 — Create Linear sub-issues in parallel
+        await self._phase_create_sub_issues()
+        logger.info("[%s] Planning complete: %d sub-issue(s) created in Linear", self._label, len(self.tasks))
+
+    async def execute(self) -> None:
+        """Run execution phases (5-7). Designed to run under a concurrency semaphore.
+
+        Recovers Linear state (set by plan()) then implements, tests, reviews, and submits.
+        """
+        logger.info("[%s] Starting execution: %s", self._label, self.event.title)
+
+        # Phase 0.5 — Recover state from Linear (written by plan())
+        state = await self._phase_check_linear()
+
+        if state.blocked:
+            logger.info("[%s] Blocked in Linear — skipping execution", self._label)
+            return
+
+        if state.in_review and state.pr_url:
+            if await self._pr_is_open(state.pr_url):
+                logger.info("[%s] PR %s still open — skipping execution", self._label, state.pr_url)
+                return
             state = LinearState(found=False)
 
         if state.found:
@@ -459,64 +536,15 @@ class IssueWorkflow:
                 await self._phase_final_linear_update()
                 return
 
-        # Phase 1+2 — Create Linear issue + Analyze codebase (parallel when both needed)
-        need_linear = not state.found
-        need_analysis = not self.tasks
-
-        if need_linear and need_analysis:
-            logger.info("[%s] Phase 1+2: Creating Linear issue + analyzing codebase in parallel", self._label)
-            linear_result, self.analysis = await asyncio.gather(
-                self._run_linear_tracker(self._prompt_create_linear_issue()),
-                self._run_codebase_analyzer(self._prompt_analyze_codebase()),
-            )
-            self.linear_issue_id = _extract_linear_id(linear_result)
-            self.linear_project_id = _extract_uuid(linear_result)
-            logger.info("[%s] Linear issue: %s", self._label, self.linear_issue_id)
-
-        elif need_linear:
-            logger.info("[%s] Phase 1: Creating Linear issue", self._label)
-            result = await self._run_linear_tracker(self._prompt_create_linear_issue())
-            self.linear_issue_id = _extract_linear_id(result)
-            self.linear_project_id = _extract_uuid(result)
-
-        elif need_analysis:
-            logger.info("[%s] Phase 2: Analyzing codebase", self._label)
-            self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
-
-        # Post analysis progress comment
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: 🔍 **Codebase analyzed.** Planning implementation tasks..."
-            )
-
-        # Phase 3 — Plan
-        if not self.tasks:
-            logger.info("[%s] Phase 3: Planning tasks", self._label)
-            plan_result = await self._run_planner(self._prompt_plan())
-            self.tasks = _parse_task_list(plan_result)
-
-            if self.tasks and self.tasks[0].description.startswith("AMBIGUOUS:"):
-                await self._phase_blocked(self.tasks[0].description)
-                return
-
-            if self.linear_issue_id:
-                task_list = "\n".join(f"{i+1}. {t.title}" for i, t in enumerate(self.tasks))
-                await self._run_linear_tracker(
-                    f"Operation F: Add progress comment.\n"
-                    f"Issue ID: {self.linear_issue_id}\n"
-                    f"Comment: 📋 **Plan ready — {len(self.tasks)} tasks:**\n{task_list}"
-                )
-
-        # Phase 4 — Create Linear sub-issues (parallel)
-        await self._phase_create_sub_issues()
+        # Re-analyze codebase — execution needs fresh context for coder prompts
+        logger.info("[%s] Phase 2 (re-analyze): Refreshing codebase analysis for execution", self._label)
+        self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
 
         # Phase 5 — Execute tasks in dependency batches
         if await self._phase_execute_tasks():
             return  # blocked
 
-        # Refresh modified files from git (authoritative, replaces heuristic parsing)
+        # Refresh modified files from git (authoritative)
         self.modified_files = await self._get_modified_files_from_git()
 
         # Phase 5.5 — Test & remediate (uses dedicated tester agent)
@@ -532,6 +560,11 @@ class IssueWorkflow:
 
         # Phase 7 — Final Linear update
         await self._phase_final_linear_update()
+
+    async def run(self) -> None:
+        """Full workflow: plan then execute. Kept for backward compatibility."""
+        await self.plan()
+        await self.execute()
 
     # ---------------------------------------------------------------------- #
     # Phase implementations                                                   #
@@ -923,15 +956,40 @@ class IssueWorkflow:
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
 
+async def run_issue_planning(event: "IssueEvent") -> None:
+    """Run planning phases only (0.5-4). No concurrency semaphore needed."""
+    logger.info(
+        "Starting planning for %s#%d: %s",
+        event.repo_full_name, event.number, event.title,
+    )
+    async with issue_workspace(event.repo_name, event.number, event.clone_url) as workspace_dir:
+        _write_security_settings(workspace_dir)
+        workflow = IssueWorkflow(event, workspace_dir)
+        await workflow.plan()
+    logger.info("Planning complete for %s#%d", event.repo_full_name, event.number)
+
+
+async def run_issue_execution(event: "IssueEvent") -> None:
+    """Run execution phases only (5-7). Should run under a concurrency semaphore."""
+    logger.info(
+        "Starting execution for %s#%d: %s",
+        event.repo_full_name, event.number, event.title,
+    )
+    async with issue_workspace(event.repo_name, event.number, event.clone_url) as workspace_dir:
+        _write_security_settings(workspace_dir)
+        workflow = IssueWorkflow(event, workspace_dir)
+        await workflow.execute()
+    logger.info("Execution complete for %s#%d", event.repo_full_name, event.number)
+
+
 async def run_issue_workflow(event: "IssueEvent") -> None:
+    """Full workflow: plan then execute. Kept for backward compatibility."""
     logger.info(
         "Starting workflow for %s#%d: %s",
         event.repo_full_name, event.number, event.title,
     )
-
     async with issue_workspace(event.repo_name, event.number, event.clone_url) as workspace_dir:
         _write_security_settings(workspace_dir)
         workflow = IssueWorkflow(event, workspace_dir)
         await workflow.run()
-
     logger.info("Workflow complete for %s#%d", event.repo_full_name, event.number)

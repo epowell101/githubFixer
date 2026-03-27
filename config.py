@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # How long (seconds) to allow a single issue workflow before timing out
     issue_timeout_seconds: int = 1800  # 30 minutes
 
+    # How long (seconds) to allow planning phases (0.5-4) before timing out
+    planning_timeout_seconds: int = 600  # 10 minutes
+
 
 
 @lru_cache
