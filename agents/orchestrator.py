@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from agents.definitions import AGENT_MODELS
 from config import settings
-from linear_config import LINEAR_TOOLS, get_linear_mcp_config
+from linear_client import LinearState, LinearTask, get_linear_client
 from prompts import load_prompt
 from security import bash_security_hook
 from workspace import issue_workspace
@@ -110,16 +110,6 @@ class Task:
     status: str = "todo"  # "todo", "in_progress", "done"
     modified_files: list[str] = field(default_factory=list)
 
-
-@dataclass
-class LinearState:
-    found: bool
-    blocked: bool = False
-    in_review: bool = False
-    pr_url: str | None = None
-    linear_issue_id: str | None = None
-    linear_project_id: str | None = None
-    tasks: list[Task] = field(default_factory=list)
 
 
 @dataclass
@@ -252,21 +242,7 @@ async def _gh_subprocess(args: list[str], cwd: Path, timeout: float = 30.0) -> s
 # Parsing helpers                                                               #
 # --------------------------------------------------------------------------- #
 
-_LINEAR_ID_RE = re.compile(r'\b([A-Z]+-\d+)\b')
-_UUID_RE = re.compile(
-    r'\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b', re.I
-)
 _PR_URL_RE = re.compile(r'https://github\.com/\S+/pull/\d+')
-
-
-def _extract_linear_id(text: str) -> str | None:
-    m = _LINEAR_ID_RE.search(text)
-    return m.group(1) if m else None
-
-
-def _extract_uuid(text: str) -> str | None:
-    m = _UUID_RE.search(text)
-    return m.group(1) if m else None
 
 
 def _extract_pr_url(text: str) -> str | None:
@@ -300,41 +276,6 @@ def _parse_task_list(text: str) -> list[Task]:
         depends_on=[],
     )]
 
-
-def _parse_linear_state(text: str) -> LinearState:
-    start = text.find('{')
-    end = text.rfind('}') + 1
-    if start == -1 or end == 0:
-        return LinearState(found=False)
-    try:
-        data = json.loads(text[start:end])
-    except json.JSONDecodeError:
-        return LinearState(found=False)
-
-    if not data.get("found"):
-        return LinearState(found=False)
-
-    tasks = [
-        Task(
-            title=t.get("title", ""),
-            description=t.get("description", ""),
-            files_hint=[],
-            acceptance="",
-            depends_on=[],
-            linear_id=t.get("linear_id"),
-            status=t.get("status", "todo"),
-        )
-        for t in data.get("tasks", [])
-    ]
-    return LinearState(
-        found=True,
-        blocked=data.get("blocked", False),
-        in_review=data.get("in_review", False),
-        pr_url=data.get("pr_url"),
-        linear_issue_id=data.get("linear_issue_id"),
-        linear_project_id=data.get("linear_project_id"),
-        tasks=tasks,
-    )
 
 
 def _extract_checklist_section(text: str) -> str | None:
@@ -439,7 +380,6 @@ def _write_security_settings(workspace_dir: Path) -> Path:
                 "Glob(./**)",
                 "Grep(./**)",
                 "Bash(*)",
-                "mcp__linear__*",
             ],
         },
     }
@@ -475,8 +415,10 @@ class IssueWorkflow:
         self.pr_url: str | None = None
         self.modified_files: list[str] = []
 
+        # Direct Linear API client (replaces linear-tracker LLM agent)
+        self._linear = get_linear_client()
+
         # Preload prompts once
-        self._linear_prompt = load_prompt("linear_tracker")
         self._analyzer_prompt = load_prompt("codebase_analyzer")
         self._coder_prompt = load_prompt("coder")
         self._tester_prompt = load_prompt("tester")
@@ -487,19 +429,30 @@ class IssueWorkflow:
         self._spec_reviewer_prompt = load_prompt("spec_reviewer")
 
     # ---------------------------------------------------------------------- #
-    # Agent runners — each creates a fresh session                            #
+    # Linear helpers                                                          #
     # ---------------------------------------------------------------------- #
 
-    async def _run_linear_tracker(self, task: str) -> str:
-        client = _make_agent_client(
-            system_prompt=self._linear_prompt,
-            model=AGENT_MODELS["linear-tracker"],
-            tools=LINEAR_TOOLS,
-            repo_path=self.repo_path,
-            settings_file=self.settings_file,
-            mcp_servers=get_linear_mcp_config(),
+    def _linear_bg(self, comment: str) -> None:
+        """Fire-and-forget a Linear progress comment (Op F).
+
+        The orchestrator never uses the return value of progress comments, so
+        we schedule them as background tasks rather than blocking the workflow.
+        """
+        if not self.linear_issue_id:
+            return
+        asyncio.create_task(
+            self._linear_safe_comment(self.linear_issue_id, comment)
         )
-        return await _run_agent(client, task, f"{self._label} linear")
+
+    async def _linear_safe_comment(self, identifier: str, body: str) -> None:
+        try:
+            await self._linear.add_comment(identifier, body)
+        except Exception as exc:
+            logger.warning("[%s] Background Linear comment failed: %s", self._label, exc)
+
+    # ---------------------------------------------------------------------- #
+    # Agent runners — each creates a fresh session                            #
+    # ---------------------------------------------------------------------- #
 
     async def _run_codebase_analyzer(self, task: str) -> str:
         client = _make_agent_client(
@@ -610,9 +563,7 @@ class IssueWorkflow:
             logger.info("[%s] Unblocking: %d user reply(ies) found", self._label, len(user_replies))
             self.linear_issue_id = state.linear_issue_id
             self.linear_project_id = state.linear_project_id
-            await self._run_linear_tracker(
-                f"Use save_issue to set Linear issue {self.linear_issue_id} state to 'In Progress'."
-            )
+            await self._linear.update_state(self.linear_issue_id, "In Progress")
             self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
             if not await self._phase_write_spec(prior_comments=user_replies):
                 return
@@ -650,22 +601,22 @@ class IssueWorkflow:
                 self._run_codebase_analyzer(self._prompt_analyze_codebase())
             )
             async with _linear_project_lock(self.event.repo_full_name):
-                linear_result = await self._run_linear_tracker(self._prompt_create_linear_issue())
-                self.linear_issue_id = _extract_linear_id(linear_result)
-                self.linear_project_id = _extract_uuid(linear_result)
+                self.linear_issue_id, self.linear_project_id = await self._linear.create_issue(
+                    title=f"[Auto] #{self.event.number}: {self.event.title}",
+                    description=f"{self.event.body or ''}\n\nGitHub Issue: {self.event.html_url}",
+                    project_name=self.event.repo_full_name,
+                )
             self.analysis = await analysis_task
             logger.info("[%s] Linear issue: %s", self._label, self.linear_issue_id)
         else:
             logger.info("[%s] Phase 2: Analyzing codebase (attempting spec recovery)", self._label)
-            self.spec = await self._fetch_spec_from_linear() or ""
-            self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
-
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: 🔍 **Codebase analyzed.** Writing specification..."
+            spec_result, self.analysis = await asyncio.gather(
+                self._fetch_spec_from_linear(),
+                self._run_codebase_analyzer(self._prompt_analyze_codebase()),
             )
+            self.spec = spec_result or ""
+
+        self._linear_bg("🔍 **Codebase analyzed.** Writing specification...")
 
         # Phase 2.5 — Write spec (skip if recovered from Linear)
         if not self.spec:
@@ -673,24 +624,14 @@ class IssueWorkflow:
             if not await self._phase_write_spec():
                 return
 
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: 📝 **Spec written.** Reviewing against requirements..."
-            )
+        self._linear_bg("📝 **Spec written.** Reviewing against requirements...")
 
         # Phase 2.7 — Spec reviewer verifies spec covers all requirements
         logger.info("[%s] Phase 2.7: Reviewing spec", self._label)
         if not await self._phase_review_spec():
             return
 
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: ✅ **Spec approved.** Breaking into implementation tasks..."
-            )
+        self._linear_bg("✅ **Spec approved.** Breaking into implementation tasks...")
 
         # Phase 3 — Plan tasks from spec
         logger.info("[%s] Phase 3: Planning tasks from spec", self._label)
@@ -701,13 +642,8 @@ class IssueWorkflow:
             await self._phase_blocked(self.tasks[0].description)
             return
 
-        if self.linear_issue_id:
-            task_list = "\n".join(f"{i+1}. {t.title}" for i, t in enumerate(self.tasks))
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: 📋 **Plan ready — {len(self.tasks)} tasks:**\n{task_list}"
-            )
+        task_list = "\n".join(f"{i+1}. {t.title}" for i, t in enumerate(self.tasks))
+        self._linear_bg(f"📋 **Plan ready — {len(self.tasks)} tasks:**\n{task_list}")
 
         # Phase 4 — Create Linear sub-issues in parallel
         await self._phase_create_sub_issues()
@@ -744,7 +680,18 @@ class IssueWorkflow:
             self.linear_issue_id = state.linear_issue_id
             self.linear_project_id = state.linear_project_id
             if state.tasks:
-                self.tasks = state.tasks
+                self.tasks = [
+                    Task(
+                        title=t.title,
+                        description=t.description,
+                        linear_id=t.linear_id,
+                        status=t.status,
+                        files_hint=[],
+                        acceptance="",
+                        depends_on=[],
+                    )
+                    for t in state.tasks
+                ]
 
             if state.pr_url:
                 if await self._pr_is_open(state.pr_url):
@@ -860,14 +807,10 @@ class IssueWorkflow:
         if not self.linear_issue_id:
             return None
         try:
-            raw = await self._run_linear_tracker(
-                f"Operation H: Fetch all comments for issue {self.linear_issue_id}."
-            )
-            start, end = raw.find('['), raw.rfind(']') + 1
-            if start != -1 and end > 0:
-                for comment in json.loads(raw[start:end]):
-                    if isinstance(comment, str) and comment.startswith("SPEC:"):
-                        return comment[len("SPEC:"):].strip()
+            comments = await self._linear.get_comments(self.linear_issue_id)
+            for comment in comments:
+                if isinstance(comment, str) and comment.startswith("SPEC:"):
+                    return comment[len("SPEC:"):].strip()
         except Exception:
             pass
         return None
@@ -918,12 +861,7 @@ class IssueWorkflow:
 
         self.spec = result
 
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: SPEC:\n{self.spec}"
-            )
+        self._linear_bg(f"SPEC:\n{self.spec}")
 
         return True
 
@@ -978,12 +916,7 @@ class IssueWorkflow:
 
         logger.info("[%s] Spec reviewer: APPROVED after revision", self._label)
         # Update the stored spec comment with the reviewed version
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: SPEC:\n{self.spec}"
-            )
+        self._linear_bg(f"SPEC:\n{self.spec}")
         return True
 
     async def _update_spec_progress(self) -> None:
@@ -994,22 +927,11 @@ class IssueWorkflow:
         if updated_spec == self.spec:
             return
         self.spec = updated_spec
-        await self._run_linear_tracker(
-            f"Operation F: Add progress comment.\n"
-            f"Issue ID: {self.linear_issue_id}\n"
-            f"Comment: SPEC (completed ✅):\n{self.spec}"
-        )
+        self._linear_bg(f"SPEC (completed ✅):\n{self.spec}")
 
     async def _phase_check_linear(self) -> LinearState:
         logger.info("[%s] Phase 0.5: Checking Linear state", self._label)
-        result = await self._run_linear_tracker(
-            f"Operation G: Check if a Linear parent issue exists for GitHub issue #{self.event.number}.\n\n"
-            f"GitHub issue number: {self.event.number}\n"
-            f"GitHub repo full name: {self.event.repo_full_name}\n"
-            f"Linear Team ID: {settings.linear_team_id}\n\n"
-            f"Return the full reconstruction JSON."
-        )
-        return _parse_linear_state(result)
+        return await self._linear.check_state(self.event.number, self.event.repo_full_name)
 
     async def _phase_create_sub_issues(self) -> None:
         tasks_needing_id = [t for t in self.tasks if not t.linear_id]
@@ -1017,24 +939,21 @@ class IssueWorkflow:
             return
 
         logger.info("[%s] Phase 4: Creating %d sub-issues in parallel", self._label, len(tasks_needing_id))
-        prompts = [
-            f"Operation D: Create a sub-issue under the parent Linear issue.\n\n"
-            f"Parent Linear issue ID: {self.linear_issue_id}\n"
-            f"Task title: {t.title}\n"
-            f"Task description: {t.description}\n"
-            f"Linear Team ID: {settings.linear_team_id}\n\n"
-            f"Return the sub-issue identifier (e.g., MAN-43)."
+        sub_ids = await asyncio.gather(*[
+            self._linear.create_sub_issue(
+                parent_id=self.linear_issue_id,
+                title=t.title,
+                description=t.description,
+            )
             for t in tasks_needing_id
-        ]
-        results = await asyncio.gather(*[self._run_linear_tracker(p) for p in prompts])
+        ])
 
-        for task, result in zip(tasks_needing_id, results):
-            task.linear_id = _extract_linear_id(result)
-            if task.linear_id is None:
-                logger.warning("[%s] Failed to extract Linear ID for sub-issue '%s' from: %.200s",
-                               self._label, task.title, result)
+        for task, sub_id in zip(tasks_needing_id, sub_ids):
+            task.linear_id = sub_id
+            if sub_id is None:
+                logger.warning("[%s] Failed to create Linear sub-issue for '%s'", self._label, task.title)
             else:
-                logger.info("[%s] Sub-issue '%s' → %s", self._label, task.title, task.linear_id)
+                logger.info("[%s] Sub-issue '%s' → %s", self._label, task.title, sub_id)
 
     async def _phase_execute_tasks(self) -> bool:
         """Execute all tasks in dependency batches. Returns True if blocked."""
@@ -1043,11 +962,7 @@ class IssueWorkflow:
         if incomplete:
             logger.info("[%s] Phase 5a: Marking %d tasks In Progress in parallel", self._label, len(incomplete))
             await asyncio.gather(*[
-                self._run_linear_tracker(
-                    f"Operation E: Update sub-issue status.\n"
-                    f"Sub-issue identifier: {t.linear_id}\n"
-                    f"New status: In Progress"
-                )
+                self._linear.update_state(t.linear_id, "In Progress")
                 for t in incomplete
             ])
             for t in incomplete:
@@ -1072,23 +987,15 @@ class IssueWorkflow:
                     logger.info("[%s] Task '%s': checklist section found (%d chars)", self._label, task.title, len(checklist))
                 else:
                     logger.warning("[%s] Task '%s': no ## Completion Checklist section in coder output", self._label, task.title)
-                if checklist and self.linear_issue_id:
-                    await self._run_linear_tracker(
-                        f"Operation F: Add progress comment.\n"
-                        f"Issue ID: {self.linear_issue_id}\n"
-                        f"Comment: 📋 **Task checklist — {task.title}**\n\n{checklist}"
-                    )
+                if checklist:
+                    self._linear_bg(f"📋 **Task checklist — {task.title}**\n\n{checklist}")
 
         # 5c — Mark all tasks Done (parallel)
         executed = [t for t in self.tasks if t.linear_id]
         if executed:
             logger.info("[%s] Phase 5c: Marking %d tasks Done in parallel", self._label, len(executed))
             await asyncio.gather(*[
-                self._run_linear_tracker(
-                    f"Operation E: Update sub-issue status.\n"
-                    f"Sub-issue identifier: {t.linear_id}\n"
-                    f"New status: Done"
-                )
+                self._linear.update_state(t.linear_id, "Done")
                 for t in executed
             ])
             for t in executed:
@@ -1099,11 +1006,7 @@ class IssueWorkflow:
     async def _phase_test_and_remediate(self, cycle: int = 0) -> bool:
         """Run tests via the tester agent and remediate failures. Returns True if tests pass."""
         if cycle >= settings.max_remediation_cycles:
-            if self.linear_issue_id:
-                await self._run_linear_tracker(
-                    f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                    f"Comment: ⚠️ Tests still failing after {settings.max_remediation_cycles} remediation cycles."
-                )
+            self._linear_bg(f"⚠️ Tests still failing after {settings.max_remediation_cycles} remediation cycles.")
             await self._phase_blocked(
                 f"Tests still failing after {settings.max_remediation_cycles} remediation cycles"
             )
@@ -1114,20 +1017,12 @@ class IssueWorkflow:
         result = _parse_tester_output(raw)
 
         if result.passed:
-            if self.linear_issue_id:
-                await self._run_linear_tracker(
-                    f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                    f"Comment: ✅ All tests passing ({result.summary}). Proceeding to review."
-                )
+            self._linear_bg(f"✅ All tests passing ({result.summary}). Proceeding to review.")
             return True
 
         # Tests failed — create remediation tasks
         logger.info("[%s] Phase 5.5: %d failure(s): %s", self._label, len(result.failures), result.summary)
-        if self.linear_issue_id:
-            await self._run_linear_tracker(
-                f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                f"Comment: 🔧 Test failures (cycle {cycle + 1}/2): {result.summary}"
-            )
+        self._linear_bg(f"🔧 Test failures (cycle {cycle + 1}/2): {result.summary}")
 
         fix_tasks = [
             Task(
@@ -1159,11 +1054,7 @@ class IssueWorkflow:
         Re-reviews after each round of coder fixes, up to settings.max_review_cycles.
         """
         if cycle >= settings.max_review_cycles:
-            if self.linear_issue_id:
-                await self._run_linear_tracker(
-                    f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                    f"Comment: ⚠️ Review issues unresolved after {settings.max_review_cycles} fix attempt(s)."
-                )
+            self._linear_bg(f"⚠️ Review issues unresolved after {settings.max_review_cycles} fix attempt(s).")
             await self._phase_blocked(
                 f"Review issues unresolved after {settings.max_review_cycles} fix attempt(s)"
             )
@@ -1174,35 +1065,25 @@ class IssueWorkflow:
         result = _parse_reviewer_output(raw)
 
         # Post reviewer checklist to Linear regardless of verdict
-        if result.checklist and self.linear_issue_id:
+        if result.checklist:
             checklist_lines = "\n".join(
                 f"- {'[x]' if item.get('passed', True) else '[ ]'} {item.get('criterion', '')}"
                 for item in result.checklist
             )
             verdict_icon = "✅" if result.approved else "❌"
-            await self._run_linear_tracker(
-                f"Operation F: Add progress comment.\n"
-                f"Issue ID: {self.linear_issue_id}\n"
-                f"Comment: {verdict_icon} **Review checklist (cycle {cycle + 1})**\n\n{checklist_lines}"
-            )
+            self._linear_bg(f"{verdict_icon} **Review checklist (cycle {cycle + 1})**\n\n{checklist_lines}")
 
         if result.approved:
-            if self.linear_issue_id:
-                await self._run_linear_tracker(
-                    f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                    f"Comment: ✅ Code review passed. {result.summary}"
-                )
+            self._linear_bg(f"✅ Code review passed. {result.summary}")
             return True
 
         # Critical issues found — create fix tasks, apply them, then re-review
         logger.info("[%s] Phase 5.6: %d critical issue(s) found", self._label, len(result.critical_issues))
-        if self.linear_issue_id:
-            issues_list = "\n".join(f"- {i.get('description', '')}" for i in result.critical_issues)
-            await self._run_linear_tracker(
-                f"Operation F: Add comment.\nIssue ID: {self.linear_issue_id}\n"
-                f"Comment: 🔍 Review cycle {cycle + 1}/{settings.max_review_cycles} — "
-                f"{len(result.critical_issues)} issue(s):\n{issues_list}"
-            )
+        issues_list = "\n".join(f"- {i.get('description', '')}" for i in result.critical_issues)
+        self._linear_bg(
+            f"🔍 Review cycle {cycle + 1}/{settings.max_review_cycles} — "
+            f"{len(result.critical_issues)} issue(s):\n{issues_list}"
+        )
 
         fix_tasks = [
             Task(
@@ -1232,11 +1113,7 @@ class IssueWorkflow:
         """Execute a specific subset of tasks (e.g. remediation fixes). Returns True if blocked."""
         # Mark In Progress
         await asyncio.gather(*[
-            self._run_linear_tracker(
-                f"Operation E: Update sub-issue status.\n"
-                f"Sub-issue identifier: {t.linear_id}\n"
-                f"New status: In Progress"
-            )
+            self._linear.update_state(t.linear_id, "In Progress")
             for t in tasks if t.linear_id
         ])
 
@@ -1252,11 +1129,7 @@ class IssueWorkflow:
 
         # Mark Done
         await asyncio.gather(*[
-            self._run_linear_tracker(
-                f"Operation E: Update sub-issue status.\n"
-                f"Sub-issue identifier: {t.linear_id}\n"
-                f"New status: Done"
-            )
+            self._linear.update_state(t.linear_id, "Done")
             for t in tasks if t.linear_id
         ])
         for t in tasks:
@@ -1300,7 +1173,7 @@ class IssueWorkflow:
         else:
             if last_err:
                 raise last_err
-        await self._update_spec_progress()
+        asyncio.create_task(self._update_spec_progress())
 
     async def _phase_reconcile_subtasks(self) -> None:
         """Safety net: mark any lingering sub-tasks as Done before final update."""
@@ -1309,11 +1182,7 @@ class IssueWorkflow:
             return
         logger.info("[%s] Reconcile: marking %d lingering sub-task(s) Done", self._label, len(pending))
         await asyncio.gather(*[
-            self._run_linear_tracker(
-                f"Operation E: Update sub-issue status.\n"
-                f"Sub-issue identifier: {t.linear_id}\n"
-                f"New status: Done"
-            )
+            self._linear.update_state(t.linear_id, "Done")
             for t in pending
         ])
         for t in pending:
@@ -1324,39 +1193,21 @@ class IssueWorkflow:
             return
         await self._phase_reconcile_subtasks()
         logger.info("[%s] Phase 7: Final Linear update", self._label)
-        await self._run_linear_tracker(
-            f"Operation B: Mark the Linear issue as In Review with the PR URL.\n\n"
-            f"Linear issue identifier: {self.linear_issue_id}\n"
-            f"PR URL: {self.pr_url or 'N/A'}\n"
-            f"Linear project ID: {self.linear_project_id or 'null'}"
+        await self._linear.mark_in_review(
+            self.linear_issue_id,
+            self.pr_url or "N/A",
+            self.linear_project_id,
         )
 
     async def _phase_blocked(self, reason: str) -> None:
         logger.warning("[%s] Phase BLOCKED: %s", self._label, reason)
         if not self.linear_issue_id:
             return
-        await self._run_linear_tracker(
-            f"Operation C: Mark as Needs Clarification.\n\n"
-            f"Linear issue identifier: {self.linear_issue_id}\n"
-            f"Reason: {reason}"
-        )
+        await self._linear.mark_cancelled(self.linear_issue_id, reason)
 
     # ---------------------------------------------------------------------- #
     # Prompt builders                                                          #
     # ---------------------------------------------------------------------- #
-
-    def _prompt_create_linear_issue(self) -> str:
-        return (
-            f"Operation A: Create a new Linear issue to track this work.\n\n"
-            f"GitHub issue title: {self.event.title}\n"
-            f"GitHub issue body: {self.event.body or '(no body)'}\n"
-            f"GitHub issue number: {self.event.number}\n"
-            f"GitHub issue URL: {self.event.html_url}\n"
-            f"GitHub repo full name: {self.event.repo_full_name}\n"
-            f"Linear Team ID: {settings.linear_team_id}\n"
-            f"Linear Project Name: {self.event.repo_full_name}\n\n"
-            f"Return the Linear issue ID (e.g., MAN-42) and the Linear project ID (UUID)."
-        )
 
     def _prompt_analyze_codebase(self) -> str:
         return (

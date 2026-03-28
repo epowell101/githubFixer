@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-from linear_config import LINEAR_TOOLS
 from config import settings
 from prompts import load_prompt
 
@@ -21,7 +20,6 @@ AGENT_MODELS: dict[str, str] = {
     "tester": settings.tester_agent_model,
     "reviewer": settings.reviewer_agent_model,
     "github-submitter": settings.github_agent_model,
-    "linear-tracker": settings.linear_agent_model,
     "planner": settings.planner_agent_model,
     "spec-writer": settings.spec_writer_agent_model,
     "spec-reviewer": settings.spec_reviewer_agent_model,
@@ -77,19 +75,6 @@ def make_github_submitter() -> AgentDefinition:
         model=_shortname(settings.github_agent_model),
     )
 
-
-def make_linear_tracker() -> AgentDefinition:
-    return AgentDefinition(
-        description=(
-            "Linear project management agent. Operations: "
-            "A=create parent issue, B=mark In Review with PR URL, C=mark Needs Clarification, "
-            "D=create sub-issue under parent, G=query existing issue state for resume. "
-            "Returns Linear issue IDs or confirmation."
-        ),
-        prompt=load_prompt("linear_tracker"),
-        tools=LINEAR_TOOLS,
-        model=_shortname(settings.linear_agent_model),
-    )
 
 
 def make_tester() -> AgentDefinition:
