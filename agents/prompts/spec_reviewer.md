@@ -49,9 +49,11 @@ Review these areas in order:
 
 3. **Acceptance Criteria completeness** — Is there a verifiable criterion for each distinct thing the issue asks for? If the issue says "A, B, and C must work," there should be a criterion for each.
 
-4. **Technical Approach consistency** — Does the Technical Approach contradict any requirement? (e.g., the issue requires modifying X, but the approach only touches Y)
+4. **Technical Approach consistency** — Does the Technical Approach contradict any requirement? (e.g., the issue requires modifying X, but the approach only touches Y). Does the Technical Approach reference file paths and functions that actually exist in the codebase analysis, or does it reference phantom code?
 
 5. **Scope drift** — Does the spec add significant scope that the issue did not request? (Minor expansions for correctness are fine; large additions are not)
+
+6. **Test plan feasibility** — Does the Test Plan reference specific, existing test files or patterns from the codebase analysis? Is the testing approach realistic given the test infrastructure that exists?
 
 ## Rules
 

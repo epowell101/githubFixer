@@ -75,7 +75,13 @@ Or on failure:
 
 - Do NOT modify any files
 - Do NOT install missing dependencies (report the error instead)
-- If no tests exist, return `{"status": "PASS", "summary": "No test suite found", "command": "", "failures": []}`
+- If no tests exist, return `{"status": "PASS", "summary": "No test suite found — no tests to verify against", "command": "", "failures": [], "warning": "No tests exist in this repository"}`
 - If the test command fails to run (e.g., import error, missing dep), set `"status": "FAIL"` and put the error in `failures[0].error` with `"test": "test suite setup"`
+- If tests require a database, Docker, or external service that isn't available, report that in the failures rather than attempting to start services
+- If the test suite takes more than 5 minutes, terminate it and report: `{"status": "FAIL", "summary": "Test suite timed out after 5 minutes", "command": "...", "failures": [{"test": "timeout", "error": "Test suite exceeded 5 minute limit", "file": "", "suggested_fix": "Check for hanging tests or infinite loops"}]}`
 - Keep `suggested_fix` to one sentence — the coder will handle the details
-- Limit `failures` to the 5 most distinct failures (don't repeat the same root cause more than twice)
+- Report up to 5 distinct root causes. If there are more, include a note in the summary like "and N additional failures, likely related to the above"
+- If the codebase analysis identifies specific test files for the affected modules, run those first. If they all pass, run the full suite. If no specific test files are identified, run the full suite.
+- Your response MUST start with `{` — any text before the JSON will cause a parsing delay
+
+If a tool call returns an error, read the error message, adjust your approach, and retry once. If it fails again, report the error in your output.

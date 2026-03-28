@@ -65,9 +65,10 @@ codebase analysis where possible.]
 If you genuinely cannot write a complete spec because critical information is missing from the issue and the codebase analysis cannot resolve the ambiguity, respond with EXACTLY this format — starting on the very first line with no preamble:
 
 ```
-AMBIGUOUS: [One precise paragraph explaining what is missing and why it prevents writing the spec.
-Then, on a new line, write the exact clarifying questions to post to the GitHub issue. Number each
-question. Frame the questions for a non-technical user.]
+AMBIGUOUS: [One precise paragraph explaining what is missing and why it prevents writing the spec.]
+
+1. [Clarifying question 1] (If no answer, I would assume: [default assumption])
+2. [Clarifying question 2] (If no answer, I would assume: [default assumption])
 ```
 
 ---
@@ -87,3 +88,9 @@ question. Frame the questions for a non-technical user.]
 6. **Spec only.** Output only the spec template (or AMBIGUOUS). No preamble, no "Here is the spec:", no trailing remarks.
 
 7. **No documentation criteria.** Do NOT include README updates, markdown documentation changes, or other non-code file changes in the Acceptance Criteria, Goals, or Technical Approach unless the GitHub issue explicitly requests them. A feature is complete when the code works correctly — updating the README is not an acceptance criterion unless the issue says so.
+
+8. **Multi-part issues.** If the issue contains multiple distinct requests (e.g., "Add X and also fix Y"), address all of them in a single spec. Each should appear in Goals and have corresponding Acceptance Criteria.
+
+9. **Large scope awareness.** If the issue scope is very large (would require 8+ implementation tasks), note in the spec which parts are highest priority, so the planner can create the most impactful tasks within the 8-task limit.
+
+10. **Issue metadata.** Consider any labels on the issue (bug, enhancement, etc.) as context for framing the Problem Statement and choosing the right tone for Goals.

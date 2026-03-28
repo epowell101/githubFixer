@@ -107,6 +107,7 @@ class Task:
     acceptance: str
     depends_on: list[int]
     linear_id: str | None = None
+    linear_url: str | None = None
     status: str = "todo"  # "todo", "in_progress", "done"
     modified_files: list[str] = field(default_factory=list)
 
@@ -574,7 +575,7 @@ class IssueWorkflow:
             if self.tasks and self.tasks[0].description.startswith("AMBIGUOUS:"):
                 await self._phase_blocked(self.tasks[0].description)
                 return
-            await self._phase_create_sub_issues()
+            await self._phase_create_linear_issues()
             logger.info("[%s] Unblock complete: %d sub-issue(s) created", self._label, len(self.tasks))
             return
 
@@ -646,7 +647,7 @@ class IssueWorkflow:
         self._linear_bg(f"📋 **Plan ready — {len(self.tasks)} tasks:**\n{task_list}")
 
         # Phase 4 — Create Linear sub-issues in parallel
-        await self._phase_create_sub_issues()
+        await self._phase_create_linear_issues()
         logger.info("[%s] Planning complete: %d sub-issue(s) created in Linear", self._label, len(self.tasks))
 
     async def code(self) -> bool:
@@ -933,12 +934,13 @@ class IssueWorkflow:
         logger.info("[%s] Phase 0.5: Checking Linear state", self._label)
         return await self._linear.check_state(self.event.number, self.event.repo_full_name)
 
-    async def _phase_create_sub_issues(self) -> None:
+    async def _phase_create_linear_issues(self) -> None:
+        """Creates a Linear issue for each task, linked to the parent issue."""
         tasks_needing_id = [t for t in self.tasks if not t.linear_id]
         if not tasks_needing_id or not self.linear_issue_id:
             return
 
-        logger.info("[%s] Phase 4: Creating %d sub-issues in parallel", self._label, len(tasks_needing_id))
+        logger.info("[%s] Phase 4: Creating %d Linear issues in parallel", self._label, len(tasks_needing_id))
         sub_ids = await asyncio.gather(*[
             self._linear.create_sub_issue(
                 parent_id=self.linear_issue_id,
@@ -951,9 +953,9 @@ class IssueWorkflow:
         for task, sub_id in zip(tasks_needing_id, sub_ids):
             task.linear_id = sub_id
             if sub_id is None:
-                logger.warning("[%s] Failed to create Linear sub-issue for '%s'", self._label, task.title)
+                logger.warning("[%s] Failed to create Linear issue for '%s'", self._label, task.title)
             else:
-                logger.info("[%s] Sub-issue '%s' → %s", self._label, task.title, sub_id)
+                logger.info("[%s] Linear issue '%s' → %s", self._label, task.title, sub_id)
 
     async def _phase_execute_tasks(self) -> bool:
         """Execute all tasks in dependency batches. Returns True if blocked."""
@@ -1041,7 +1043,7 @@ class IssueWorkflow:
 
         if fix_tasks:
             self.tasks.extend(fix_tasks)
-            await self._phase_create_sub_issues()
+            await self._phase_create_linear_issues()
             await self._phase_execute_tasks_subset(fix_tasks)
 
         # Refresh so reviewer receives an accurate file list after test fixes
@@ -1101,7 +1103,7 @@ class IssueWorkflow:
         ]
 
         self.tasks.extend(fix_tasks)
-        await self._phase_create_sub_issues()
+        await self._phase_create_linear_issues()
         blocked = await self._phase_execute_tasks_subset(fix_tasks)
         if blocked:
             return False
@@ -1140,6 +1142,22 @@ class IssueWorkflow:
     async def _phase_submit_pr(self) -> None:
         logger.info("[%s] Phase 6: Submitting PR", self._label)
         files_list = "\n".join(f"- {f}" for f in sorted(set(self.modified_files))) or "(all changed files)"
+
+        # Build Linear issue checklist for PR body
+        linear_checklist_lines = []
+        for t in self.tasks:
+            if t.linear_id:
+                linear_checklist_lines.append(f"- [x] {t.linear_id}: {t.title}")
+        linear_section = "\n".join(linear_checklist_lines) if linear_checklist_lines else (
+            f"Tracked in Linear: {self.linear_issue_id or 'N/A'}"
+        )
+
+        # Include spec summary if available
+        spec_section = ""
+        if self.spec:
+            # Extract just the Problem Statement and Goals from the spec
+            spec_section = f"\nSpec summary:\n{self.spec[:500]}...\n" if len(self.spec) > 500 else f"\nSpec:\n{self.spec}\n"
+
         prompt = (
             f"Create a pull request for GitHub issue #{self.event.number}.\n\n"
             f"Modified files:\n{files_list}\n\n"
@@ -1148,7 +1166,9 @@ class IssueWorkflow:
             f"Repo owner: {self.event.repo_owner}\n"
             f"Repo name: {self.event.repo_name}\n"
             f"Branch name: {self.event.branch_name}\n"
-            f"Linear issue ID: {self.linear_issue_id or 'N/A'}\n\n"
+            f"Linear parent issue ID: {self.linear_issue_id or 'N/A'}\n"
+            f"Linear issue checklist for PR body:\n{linear_section}\n"
+            f"{spec_section}\n"
             f"Create the branch, commit all changes, push, and open a PR "
             f"targeting the default branch. Return the PR URL."
         )

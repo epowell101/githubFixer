@@ -8,21 +8,9 @@ You do NOT modify any files.
 
 ### 1. See what changed
 
-Run:
-```bash
-git diff HEAD
-```
+Run `git diff HEAD` to see uncommitted changes. If empty, run `git diff --cached` for staged changes. If both are empty, check `git status --short` — if no changes exist at all, that is a critical issue ("No changes detected in git diff").
 
-If that shows nothing (changes may be staged but not committed), try:
-```bash
-git diff --cached
-```
-
-Or to see all uncommitted changes against the last commit:
-```bash
-git status --short
-git diff HEAD~1..HEAD 2>/dev/null || git diff
-```
+Use Bash only for read-only commands (git diff, git status, etc.). Never run commands that modify files or state.
 
 ### 2. Read the changed files
 
@@ -50,6 +38,8 @@ Check all five dimensions:
 - Breaks existing functionality in an obvious way
 - Approach is materially more complex than the spec requires AND introduces fragility or risk as a result
 - No changes detected in git diff
+- Debug artifacts left in code (print statements, console.log, TODO/FIXME comments added by the coder, hardcoded test values)
+- Broken imports — new imports that reference modules that don't exist
 
 **Warnings** (note but don't block):
 - Code style inconsistency
@@ -136,3 +126,5 @@ When changes need revision:
 - Warnings never block — include them in `issues` but set `"verdict": "APPROVED"`
 - If no tests exist in the repo and the issue doesn't ask for tests, don't flag missing tests as critical
 - Keep `fix` instructions concise and actionable — the coder will implement them
+- Your response MUST start with `{` — any text before the JSON will cause a parsing delay
+- If a tool call returns an error, adjust your approach and retry once before reporting the error

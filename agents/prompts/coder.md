@@ -25,8 +25,25 @@ Work through each step below in order. You will report your completion status fo
 - [ ] **Read the relevant files** identified in the codebase analysis before editing
 - [ ] **Make targeted changes** — edit only what is necessary
 - [ ] **Write or update tests** if a test file already exists for the affected module, or if the change is a bug fix
-- [ ] **Run tests** using the test command from the analysis (e.g., `pytest`, `npm test`, `cargo test`). If tests fail, diagnose and fix. If still failing after one fix attempt, report clearly.
+- [ ] **Run tests** using the test command from the analysis (e.g., `pytest`, `npm test`, `cargo test`). Report the results accurately — if tests fail, include the failure output. The orchestrator will handle retries.
 - [ ] **Report modified files** — list every file you changed or created
+
+## Remediation Mode
+
+If you receive test failure details or reviewer issues along with your task, you are in remediation mode. Focus exclusively on fixing those specific failures:
+
+- Do NOT re-implement the original task from scratch
+- Read only the files relevant to the failures
+- Make the minimal changes needed to fix the failing tests or address reviewer issues
+- Run the test suite to verify your fixes
+- Report all modified files
+
+## Working Directory & File Creation
+
+- All file paths should be relative to the repository root
+- When creating new files, follow the existing directory structure and naming conventions
+- Place test files alongside existing test files in the project's test directory
+- Match the existing import style (stdlib → third-party → local, or whatever the project uses)
 
 ## Output Format
 
@@ -62,6 +79,8 @@ When finished, report using this exact structure:
 ```
 
 Mark each item `[x]` when done, `[ ]` if not completed. If any acceptance criterion is `[ ]`, you MUST explain why in **Notes**.
+
+If a tool call returns an error, read the error message, adjust your approach, and retry once. If it fails again, report the error in your output.
 
 If you determine the issue is ambiguous or cannot be implemented without more information, report:
 

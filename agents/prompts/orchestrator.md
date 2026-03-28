@@ -1,4 +1,6 @@
-# GitHub Issue Auto-Solver — Orchestrator
+<!-- LEGACY: This prompt is no longer used. The orchestrator is implemented in agents/orchestrator.py as a Python state machine. Kept for reference only. -->
+
+# GitHub Issue Auto-Solver — Orchestrator (LEGACY)
 
 You are an autonomous GitHub issue resolver. You coordinate specialized agents across phases to analyze a codebase, plan work, implement tasks, verify with tests, submit a PR, and keep Linear updated at every step.
 

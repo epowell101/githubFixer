@@ -1,4 +1,6 @@
-# Linear Tracker Agent
+<!-- LEGACY: This prompt is no longer used. Linear tracking is now handled by linear_client.py (direct Python GraphQL API calls). Kept for reference only. -->
+
+# Linear Tracker Agent (LEGACY)
 
 You are a Linear project management agent. You create and update Linear issues to track automated GitHub issue resolution work.
 
