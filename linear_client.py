@@ -108,7 +108,7 @@ mutation CreateComment($issueId: String!, $body: String!) {
 """
 
 _SEARCH_ISSUES = """
-query SearchIssues($teamId: String!, $query: String!) {
+query SearchIssues($teamId: ID!, $query: String!) {
     issues(
         filter: {
             team: { id: { eq: $teamId } }
@@ -145,7 +145,7 @@ query GetIssueFull($id: String!) {
 """
 
 _TEAM_STATES = """
-query TeamStates($teamId: String!) {
+query TeamStates($teamId: ID!) {
     workflowStates(filter: { team: { id: { eq: $teamId } } }) {
         nodes { id name type }
     }
@@ -212,10 +212,15 @@ class LinearClient:
         if state_name in self._state_cache:
             return self._state_cache[state_name]
 
-        # Fallback: match case-insensitively
+        # Fallback: match case-insensitively, also handle Cancelled/Canceled spelling variants
         lower = state_name.lower()
+        variants = {lower}
+        if lower == "cancelled":
+            variants.add("canceled")
+        elif lower == "canceled":
+            variants.add("cancelled")
         for name, uid in self._state_cache.items():
-            if name.lower() == lower:
+            if name.lower() in variants:
                 return uid
 
         raise ValueError(

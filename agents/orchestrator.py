@@ -1229,9 +1229,19 @@ class IssueWorkflow:
 
     async def _phase_blocked(self, reason: str) -> None:
         logger.warning("[%s] Phase BLOCKED: %s", self._label, reason)
+        # Post GitHub comment so the issue doesn't hang open with no feedback
+        gh_body = (
+            f"## Cannot Implement\n\n"
+            f"This issue was automatically rejected by the issue-solver bot.\n\n"
+            f"**Reason:** {reason}"
+        )
+        await self._post_github_comment(gh_body)
         if not self.linear_issue_id:
             return
-        await self._linear.mark_cancelled(self.linear_issue_id, reason)
+        try:
+            await self._linear.mark_cancelled(self.linear_issue_id, reason)
+        except Exception as e:
+            logger.warning("[%s] Failed to mark Linear issue cancelled: %s", self._label, e)
 
     # ---------------------------------------------------------------------- #
     # Prompt builders                                                          #
