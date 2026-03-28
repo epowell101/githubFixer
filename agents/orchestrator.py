@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -45,6 +46,42 @@ _BASH_HOOKS = {
         )
     ]
 }
+
+class AgentStreamError(RuntimeError):
+    """Raised when an agent's response stream closes unexpectedly."""
+
+
+# Monotonically increasing instance counter per agent type (e.g. "coder" → 3).
+# Safe without a lock because asyncio runs on a single thread.
+_agent_instance_counters: dict[str, int] = {}
+
+
+def _next_agent_number(agent_type: str) -> int:
+    _agent_instance_counters[agent_type] = _agent_instance_counters.get(agent_type, 0) + 1
+    return _agent_instance_counters[agent_type]
+
+
+def _tool_summary(name: str, inp: dict) -> str:
+    """Return a short human-readable summary of a tool call's input."""
+    match name:
+        case "Read" | "Write" | "Edit" | "NotebookEdit":
+            return inp.get("file_path", "")
+        case "Bash":
+            return inp.get("command", "")[:120].replace("\n", "; ")
+        case "Glob":
+            return inp.get("pattern", "")
+        case "Grep":
+            pat = inp.get("pattern", "")
+            path = inp.get("path", "")
+            return f"{pat!r} in {path}" if path else repr(pat)
+        case "WebFetch" | "WebSearch":
+            return inp.get("url", inp.get("query", ""))[:80]
+        case _:
+            for v in inp.values():
+                if isinstance(v, str) and v:
+                    return v[:80]
+            return ""
+
 
 # Serialize Linear project creation per repo so parallel plan() calls for issues
 # in the same repo don't each create a duplicate project (race condition).
@@ -130,15 +167,70 @@ def _make_agent_client(
 async def _run_agent(client: ClaudeSDKClient, task_prompt: str, label: str = "") -> str:
     """Run a single agent session and return the full text response."""
     collected: list[str] = []
-    async with client:
-        await client.query(task_prompt)
-        async for message in client.receive_response():
-            if isinstance(message, AssistantMessage):
-                for block in getattr(message, "content", []):
-                    if isinstance(block, TextBlock) and block.text:
-                        if label:
-                            logger.info("[%s] %s", label, block.text.strip()[:1000])
-                        collected.append(block.text)
+    tool_call_count = 0
+    start = time.monotonic()
+
+    # Build a numbered per-agent-type logger, e.g. agents.coder3.
+    # The label is "repo#N agent_type"; issue_ref strips the agent type suffix.
+    if label:
+        issue_ref, agent_type = label.rsplit(" ", 1)
+        instance_num = _next_agent_number(agent_type)
+        alog = logging.getLogger(f"agents.{agent_type}{instance_num}")
+    else:
+        issue_ref = ""
+        alog = logger
+
+    if label:
+        task_summary = task_prompt.strip().replace("\n", " ")[:150]
+        alog.info("[%s] START: %s", issue_ref, task_summary)
+
+    try:
+        async with client:
+            await client.query(task_prompt)
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in getattr(message, "content", []):
+                        if isinstance(block, TextBlock) and block.text:
+                            if label:
+                                alog.info("[%s] %s", issue_ref, block.text.strip()[:1000])
+                            collected.append(block.text)
+                        elif hasattr(block, "name"):
+                            tool_call_count += 1
+                            if label:
+                                tool_input = getattr(block, "input", {}) or {}
+                                summary = _tool_summary(block.name, tool_input)
+                                if summary:
+                                    alog.info("[%s] TOOL: %s %s", issue_ref, block.name, summary)
+                                else:
+                                    alog.info("[%s] TOOL: %s", issue_ref, block.name)
+                elif isinstance(message, ResultMessage):
+                    is_error = getattr(message, "is_error", False)
+                    if is_error and label:
+                        alog.debug("[%s] TOOL_RESULT: ERROR", issue_ref)
+                elif isinstance(message, RateLimitEvent):
+                    if label:
+                        alog.debug("[%s] RATE_LIMIT event", issue_ref)
+    except Exception as exc:
+        elapsed = time.monotonic() - start
+        if label:
+            alog.error(
+                "[%s] FAILED after %.1fs (%d tool calls): %s: %s",
+                issue_ref, elapsed, tool_call_count, type(exc).__name__, exc,
+            )
+        if collected:
+            alog.warning(
+                "[%s] Returning partial output (%d blocks collected before error)",
+                issue_ref, len(collected),
+            )
+            return "\n".join(collected)
+        raise AgentStreamError(f"Agent {label!r} stream failed: {exc}") from exc
+
+    elapsed = time.monotonic() - start
+    if label:
+        alog.info(
+            "[%s] DONE in %.1fs (%d tool calls, %d text blocks)",
+            issue_ref, elapsed, tool_call_count, len(collected),
+        )
     return "\n".join(collected)
 
 
@@ -1175,7 +1267,7 @@ class IssueWorkflow:
     async def _phase_submit_pr(self) -> None:
         logger.info("[%s] Phase 6: Submitting PR", self._label)
         files_list = "\n".join(f"- {f}" for f in sorted(set(self.modified_files))) or "(all changed files)"
-        result = await self._run_github_submitter(
+        prompt = (
             f"Create a pull request for GitHub issue #{self.event.number}.\n\n"
             f"Modified files:\n{files_list}\n\n"
             f"GitHub issue number: {self.event.number}\n"
@@ -1187,8 +1279,27 @@ class IssueWorkflow:
             f"Create the branch, commit all changes, push, and open a PR "
             f"targeting the default branch. Return the PR URL."
         )
-        self.pr_url = _extract_pr_url(result)
-        logger.info("[%s] PR URL: %s", self._label, self.pr_url)
+        last_err: Exception | None = None
+        for attempt in range(1, 3):  # max 2 attempts
+            try:
+                result = await self._run_github_submitter(prompt)
+                self.pr_url = _extract_pr_url(result)
+                if self.pr_url:
+                    logger.info("[%s] PR URL: %s", self._label, self.pr_url)
+                    break
+                logger.warning(
+                    "[%s] No PR URL in submitter output (attempt %d/2)", self._label, attempt,
+                )
+            except Exception as exc:
+                last_err = exc
+                logger.warning(
+                    "[%s] PR submission failed (attempt %d/2): %s", self._label, attempt, exc,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(5)
+        else:
+            if last_err:
+                raise last_err
         await self._update_spec_progress()
 
     async def _phase_reconcile_subtasks(self) -> None:
