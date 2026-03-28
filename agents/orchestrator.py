@@ -415,6 +415,7 @@ class IssueWorkflow:
         self.spec: str = ""
         self.pr_url: str | None = None
         self.modified_files: list[str] = []
+        self._review_issue_hashes: set[int] = set()  # hashes from prior review cycles for circuit breaker
 
         # Direct Linear API client (replaces linear-tracker LLM agent)
         self._linear = get_linear_client()
@@ -702,6 +703,14 @@ class IssueWorkflow:
                     return True  # done
                 state.pr_url = None
 
+            # Feasibility gate: verify recovered tasks target technology present in this repo
+            if self.tasks and not self._check_resume_feasibility(self.tasks):
+                await self._phase_blocked(
+                    "Recovered tasks reference technology not found in this repository. "
+                    "The issue may target a different codebase or tech stack."
+                )
+                return True
+
         # Re-analyze codebase for coder/tester prompts — skip if plan() already ran
         # in this session (self.analysis is populated). The resume/restart case
         # (self.analysis == "") still re-analyzes correctly.
@@ -979,6 +988,7 @@ class IssueWorkflow:
         self._validate_batch_file_safety()
         batches = self._build_batches()
         logger.info("[%s] Phase 5b: %d batch(es), %d task(s)", self._label, len(batches), len(self.tasks))
+        pre_coding_sha = await self._git_head_sha()
 
         for batch_idx, batch in enumerate(batches):
             logger.info("[%s] Batch %d: executing %d task(s) in parallel", self._label, batch_idx, len(batch))
@@ -999,6 +1009,15 @@ class IssueWorkflow:
                     logger.warning("[%s] Task '%s': no ## Completion Checklist section in coder output", self._label, task.title)
                 if checklist:
                     self._linear_bg(f"📋 **Task checklist — {task.title}**\n\n{checklist}")
+
+        # Progress check: block immediately if coders produced zero file changes
+        if await self._git_diff_is_empty(pre_coding_sha):
+            logger.warning("[%s] Phase 5: Coders produced no file changes — blocking", self._label)
+            await self._phase_blocked(
+                "Coders produced no file changes. The tasks may target files outside this "
+                "repository or the issue may be infeasible for the current codebase."
+            )
+            return True
 
         # 5c — Mark all tasks Done (parallel)
         executed = [t for t in self.tasks if t.linear_id]
@@ -1095,6 +1114,21 @@ class IssueWorkflow:
             f"{len(result.critical_issues)} issue(s):\n{issues_list}"
         )
 
+        # Circuit breaker: if >50% of issues are identical to a prior cycle, stop immediately
+        if self._check_review_circuit_breaker(result.critical_issues):
+            logger.warning("[%s] Review circuit breaker fired — same issues repeating, blocking", self._label)
+            await self._phase_blocked(
+                "Review issues repeated across cycles without progress. "
+                "The fix may require out-of-scope changes or the issue is infeasible for this codebase."
+            )
+            return False
+
+        issues_to_fix = result.critical_issues[:settings.max_fix_tasks_per_review_cycle]
+        if len(result.critical_issues) > settings.max_fix_tasks_per_review_cycle:
+            logger.warning(
+                "[%s] Review found %d critical issues — capping at %d fix tasks",
+                self._label, len(result.critical_issues), settings.max_fix_tasks_per_review_cycle,
+            )
         fix_tasks = [
             Task(
                 title=f"Fix: {i.get('description', 'review issue')[:60]}",
@@ -1107,7 +1141,7 @@ class IssueWorkflow:
                 acceptance="Reviewer concern addressed",
                 depends_on=[],
             )
-            for i in result.critical_issues
+            for i in issues_to_fix
         ]
 
         self.tasks.extend(fix_tasks)
@@ -1127,7 +1161,11 @@ class IssueWorkflow:
             for t in tasks if t.linear_id
         ])
 
+        # Apply file-conflict safety (same as primary execution path)
+        self._validate_batch_file_safety()
+
         # Execute in parallel
+        pre_subset_sha = await self._git_head_sha()
         results = await asyncio.gather(*[self._run_coder(self._prompt_coder_task(t)) for t in tasks])
 
         for task, result in zip(tasks, results):
@@ -1136,6 +1174,12 @@ class IssueWorkflow:
                 return True
             task.modified_files = _extract_modified_files(result)
             self.modified_files.extend(task.modified_files)
+
+        if await self._git_diff_is_empty(pre_subset_sha):
+            logger.warning(
+                "[%s] Fix tasks produced no file changes (%d task(s)) — reviewer will catch this",
+                self._label, len(tasks),
+            )
 
         # Mark Done
         await asyncio.gather(*[
@@ -1330,6 +1374,78 @@ class IssueWorkflow:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
             return stdout.decode().strip().upper() == "OPEN"
+        except Exception:
+            return False
+
+    def _check_resume_feasibility(self, tasks: list[Task]) -> bool:
+        """Heuristic check: do recovered task descriptions reference tech present in this repo?
+
+        Returns False only when a known tech stack is mentioned in the tasks but NO matching
+        files exist in the repo at all. Uses glob — no LLM call, runs in microseconds.
+        """
+        import glob as _glob
+
+        task_text = " ".join(f"{t.title} {t.description}" for t in tasks).lower()
+
+        # (keywords_that_trigger_check, file_patterns_that_confirm_presence)
+        STACK_MARKERS: list[tuple[list[str], list[str]]] = [
+            (["express", "node.js", "nodejs", " .js ", "package.json"], ["*.js", "*.ts", "package.json"]),
+            (["django", "flask", "fastapi"], ["*.py"]),
+            (["rails", " ruby "], ["*.rb", "Gemfile"]),
+            (["spring boot", " java "], ["*.java", "pom.xml"]),
+            (["golang", " go "], ["*.go", "go.mod"]),
+            (["rust "], ["*.rs", "Cargo.toml"]),
+        ]
+
+        for keywords, patterns in STACK_MARKERS:
+            if not any(kw in task_text for kw in keywords):
+                continue
+            found = any(
+                _glob.glob(str(self.repo_path / "**" / pat), recursive=True)
+                for pat in patterns
+            )
+            if not found:
+                logger.warning(
+                    "[%s] Resume feasibility: tasks reference '%s' but no matching files in repo",
+                    self._label, keywords[0],
+                )
+                return False
+
+        return True
+
+    def _check_review_circuit_breaker(self, critical_issues: list[dict]) -> bool:
+        """Return True if >50% of critical issue descriptions match a prior review cycle.
+
+        On the first cycle the hash set is empty, so this always returns False — the
+        breaker only fires from cycle 1 onward. Detects when retrying produces no new
+        insight and the same failures repeat unchanged.
+        """
+        current_hashes = {
+            hash(i.get("description", "").lower().strip()) for i in critical_issues
+        }
+        if not self._review_issue_hashes:
+            # First cycle — populate the set, don't fire
+            self._review_issue_hashes.update(current_hashes)
+            return False
+
+        overlap = current_hashes & self._review_issue_hashes
+        overlap_ratio = len(overlap) / max(len(current_hashes), 1)
+        self._review_issue_hashes.update(current_hashes)
+        return overlap_ratio > 0.5
+
+    async def _git_diff_is_empty(self, base_sha: str | None) -> bool:
+        """Return True if no files changed since base_sha. Used to detect no-op coder runs."""
+        if not base_sha:
+            return False  # no baseline — assume work was done
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                f"git diff --quiet {base_sha}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.repo_path),
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            return proc.returncode == 0  # exit 0 = no diff
         except Exception:
             return False
 

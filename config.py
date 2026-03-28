@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     max_remediation_cycles: int = 3
     # Max review-fix-re-review cycles before blocking
     max_review_cycles: int = 2
+    # Max fix tasks spawned per review cycle (prevents coder explosion when reviewer lists many issues)
+    max_fix_tasks_per_review_cycle: int = 3
 
 
 
