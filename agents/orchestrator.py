@@ -1454,10 +1454,27 @@ class IssueWorkflow:
         return overlap_ratio > 0.5
 
     async def _git_diff_is_empty(self, base_sha: str | None) -> bool:
-        """Return True if no files changed since base_sha. Used to detect no-op coder runs."""
-        if not base_sha:
-            return False  # no baseline — assume work was done
+        """Return True if no files changed since base_sha. Used to detect no-op coder runs.
+
+        Checks both tracked-file diffs AND untracked new files, since coders often
+        create new files that are untracked (not staged) and thus invisible to git diff.
+        """
         try:
+            # Check for untracked new files (git diff misses these entirely)
+            proc_untracked = await asyncio.create_subprocess_exec(
+                "git", "ls-files", "--others", "--exclude-standard",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(self.repo_path),
+            )
+            stdout_u, _ = await asyncio.wait_for(proc_untracked.communicate(), timeout=10)
+            if stdout_u.strip():
+                return False  # new untracked files exist → work was done
+
+            if not base_sha:
+                return False  # no baseline — assume work was done
+
+            # Check for modifications to tracked files
             proc = await asyncio.create_subprocess_shell(
                 f"git diff --quiet {base_sha}",
                 stdout=asyncio.subprocess.PIPE,
