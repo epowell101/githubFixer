@@ -701,9 +701,14 @@ class IssueWorkflow:
                     return True  # done
                 state.pr_url = None
 
-        # Re-analyze codebase for coder/tester prompts
-        logger.info("[%s] Phase 2 (re-analyze): Refreshing codebase analysis", self._label)
-        self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
+        # Re-analyze codebase for coder/tester prompts — skip if plan() already ran
+        # in this session (self.analysis is populated). The resume/restart case
+        # (self.analysis == "") still re-analyzes correctly.
+        if not self.analysis:
+            logger.info("[%s] Phase 2: Analyzing codebase", self._label)
+            self.analysis = await self._run_codebase_analyzer(self._prompt_analyze_codebase())
+        else:
+            logger.info("[%s] Phase 2: Reusing analysis from planning phase", self._label)
 
         if self.tasks and all(t.status == "done" for t in self.tasks):
             # Tasks were completed in a prior session — collect modified files and
@@ -1341,14 +1346,15 @@ async def run_issue_full(
     event: "IssueEvent",
     coding_semaphore: asyncio.Semaphore,
     testing_semaphore: asyncio.Semaphore,
+    planning_semaphore: asyncio.Semaphore | None = None,
 ) -> None:
     """Primary entry point used by TaskRunner.
 
     Keeps one workspace open for the full lifecycle and hands off between
     semaphores at phase boundaries:
 
-      plan()              — no semaphore (runs immediately for all issues)
-      code()              — under coding_semaphore
+      plan()               — under planning_semaphore (default: 5 concurrent)
+      code()               — under coding_semaphore
       test_review_submit() — under testing_semaphore (higher limit, runs as
                              soon as a testing slot is free regardless of
                              whether the coding slots are full)
@@ -1361,8 +1367,12 @@ async def run_issue_full(
         _write_security_settings(workspace_dir)
         workflow = IssueWorkflow(event, workspace_dir)
 
-        # Planning: runs immediately, no throttle
-        await workflow.plan()
+        # Planning: throttled to prevent API rate-limit pile-up on large batches
+        if planning_semaphore is not None:
+            async with planning_semaphore:
+                await workflow.plan()
+        else:
+            await workflow.plan()
 
         # Coding: throttled to max_concurrent_issues
         async with coding_semaphore:

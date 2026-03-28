@@ -17,9 +17,12 @@ class TaskRunner:
         self,
         max_concurrent: int | None = None,
         max_concurrent_testers: int | None = None,
+        max_concurrent_planners: int | None = None,
     ) -> None:
         coding_limit = max_concurrent or settings.max_concurrent_issues
         testing_limit = max_concurrent_testers or settings.max_concurrent_testers
+        planning_limit = max_concurrent_planners or settings.max_concurrent_planners
+        self._planning_semaphore = asyncio.Semaphore(planning_limit)
         self._coding_semaphore = asyncio.Semaphore(coding_limit)
         self._testing_semaphore = asyncio.Semaphore(testing_limit)
         self._active: dict[str, asyncio.Task] = {}
@@ -42,7 +45,7 @@ class TaskRunner:
 
         try:
             await asyncio.wait_for(
-                run_issue_full(event, self._coding_semaphore, self._testing_semaphore),
+                run_issue_full(event, self._coding_semaphore, self._testing_semaphore, self._planning_semaphore),
                 # Total budget covers planning + coding + testing
                 timeout=settings.planning_timeout_seconds + settings.issue_timeout_seconds,
             )

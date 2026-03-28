@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     tester_agent_model: str = "claude-sonnet-4-6"
     reviewer_agent_model: str = "claude-sonnet-4-6"
     github_agent_model: str = "claude-haiku-4-5-20251001"
-    linear_agent_model: str = "claude-haiku-4-5-20251001"
     analyzer_agent_model: str = "claude-haiku-4-5-20251001"
     planner_agent_model: str = "claude-haiku-4-5-20251001"
     spec_writer_agent_model: str = "claude-sonnet-4-6"  # override to claude-opus-4-6 via .env
-    spec_reviewer_agent_model: str = "claude-sonnet-4-6"
+    spec_reviewer_agent_model: str = "claude-haiku-4-5-20251001"  # pure comparison, no tools
 
-    # Concurrency — direct Linear MCP supports concurrent connections
+    # Concurrency — direct Linear API supports concurrent connections
+    max_concurrent_planners: int = 5   # planning has no semaphore by default; cap at 5 concurrent
     max_concurrent_issues: int = 3
     # Testers can run more broadly in parallel than coders (I/O-bound, not CPU-bound)
     max_concurrent_testers: int = 5
@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     # GitHub bot login used to filter out bot comments when detecting user replies
     github_bot_login: str = "github-actions[bot]"
 
-    # Max code→test→fix cycles before blocking (high to allow full self-correction)
-    max_remediation_cycles: int = 12
+    # Max code→test→fix cycles before blocking
+    max_remediation_cycles: int = 3
     # Max review-fix-re-review cycles before blocking
     max_review_cycles: int = 2
 
