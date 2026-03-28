@@ -581,8 +581,12 @@ class IssueWorkflow:
             return
 
         if state.in_review and state.pr_url:
-            if await self._pr_is_open(state.pr_url):
+            pr_st = await self._pr_state(state.pr_url)
+            if pr_st == "OPEN":
                 logger.info("[%s] PR already open — no planning needed", self._label)
+                return
+            if pr_st in ("MERGED", "CLOSED"):
+                logger.info("[%s] PR %s already %s — no planning needed", self._label, state.pr_url, pr_st.lower())
                 return
 
         if state.found:
@@ -673,8 +677,12 @@ class IssueWorkflow:
             return True
 
         if state.in_review and state.pr_url:
-            if await self._pr_is_open(state.pr_url):
+            pr_st = await self._pr_state(state.pr_url)
+            if pr_st == "OPEN":
                 logger.info("[%s] PR %s still open — nothing to do", self._label, state.pr_url)
+                return True
+            if pr_st in ("MERGED", "CLOSED"):
+                logger.info("[%s] PR %s already %s — issue complete", self._label, state.pr_url, pr_st.lower())
                 return True
             state = LinearState(found=False)
 
@@ -696,11 +704,15 @@ class IssueWorkflow:
                 ]
 
             if state.pr_url:
-                if await self._pr_is_open(state.pr_url):
+                pr_st = await self._pr_state(state.pr_url)
+                if pr_st == "OPEN":
                     logger.info("[%s] PR open — jumping to Phase 7", self._label)
                     self.pr_url = state.pr_url
                     await self._phase_final_linear_update()
                     return True  # done
+                if pr_st in ("MERGED", "CLOSED"):
+                    logger.info("[%s] PR %s already %s — issue complete", self._label, state.pr_url, pr_st.lower())
+                    return True
                 state.pr_url = None
 
             # Feasibility gate: verify recovered tasks target technology present in this repo
@@ -1364,7 +1376,8 @@ class IssueWorkflow:
     # Utilities                                                                #
     # ---------------------------------------------------------------------- #
 
-    async def _pr_is_open(self, pr_url: str) -> bool:
+    async def _pr_state(self, pr_url: str) -> str:
+        """Return the PR state string (OPEN, MERGED, CLOSED) or empty string on error."""
         try:
             proc = await asyncio.create_subprocess_shell(
                 f"gh pr view {pr_url} --json state --jq '.state'",
@@ -1373,9 +1386,16 @@ class IssueWorkflow:
                 cwd=str(self.repo_path),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            return stdout.decode().strip().upper() == "OPEN"
+            return stdout.decode().strip().upper()
         except Exception:
-            return False
+            return ""
+
+    async def _pr_is_open(self, pr_url: str) -> bool:
+        return await self._pr_state(pr_url) == "OPEN"
+
+    async def _pr_is_done(self, pr_url: str) -> bool:
+        """Return True if the PR is merged or closed — no further work needed."""
+        return await self._pr_state(pr_url) in ("MERGED", "CLOSED")
 
     def _check_resume_feasibility(self, tasks: list[Task]) -> bool:
         """Heuristic check: do recovered task descriptions reference tech present in this repo?
