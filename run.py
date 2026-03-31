@@ -5,7 +5,7 @@ GitHub Issue Solver — CLI entry point
 
 Fetches open issues from a GitHub repo via the gh CLI, lets you approve
 which ones to solve, then runs the full agent pipeline
-(analyze → code → PR → Linear tracking).
+(analyze → code → PR → GitHub tracking).
 
 Usage
 -----
@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Attempt to solve issues even if marked as won't implement (Cancelled) in Linear",
+        help="Attempt to solve issues even if marked as won't implement (Cancelled) in GitHub",
     )
     return p.parse_args()
 
