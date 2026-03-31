@@ -11,23 +11,23 @@ Automatically resolves GitHub issues using a multi-agent Claude pipeline. Point 
 ## Installation
 
 ```bash
-git clone https://github.com/mando222/githubFixer.git
+git clone https://github.com/epowell101/githubFixer.git
 cd githubFixer
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (copy from `.env.example`):
 
 ```env
 # Required
-LINEAR_API_KEY=lin_api_...
-LINEAR_TEAM_ID=your-team-id
+GITHUB_TOKEN=ghp_...       # GitHub personal access token (needs 'repo' scope)
+GITHUB_REPO=owner/repo     # e.g. "epowell101/githubFixer" — repo where tracking issues are created
 
 # Optional — override default models
-# CODING_AGENT_MODEL=claude-opus-4-6
-# SPEC_WRITER_AGENT_MODEL=claude-opus-4-6
+# ORCHESTRATOR_MODEL=claude-sonnet-4-6
+# CODING_AGENT_MODEL=claude-sonnet-4-6
 
 # Optional — concurrency
 # MAX_CONCURRENT_ISSUES=3
@@ -35,7 +35,7 @@ LINEAR_TEAM_ID=your-team-id
 
 Claude authentication is handled through the Claude Code CLI — no API key needed here. Make sure you're logged in (`claude`) before running.
 
-To find your Linear Team ID: go to Linear → Settings → API → scroll to "Team IDs".
+To create a GitHub personal access token: go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token. Select the `repo` scope.
 
 ## Usage
 
@@ -62,14 +62,14 @@ python run.py owner/repo --all --force
 
 ### `--force`
 
-By default the pipeline skips issues whose Linear state is `Cancelled` or `Won't Implement`. Pass `--force` to override that check — the issue is reactivated to *In Progress* and the full pipeline runs regardless of its current state. Useful for revisiting deliberately-closed tickets or retrying a previously-rejected fix.
+By default the pipeline skips issues whose GitHub state is `Cancelled` or `Won't Implement`. Pass `--force` to override that check — the issue is reactivated to *In Progress* and the full pipeline runs regardless of its current state. Useful for revisiting deliberately-closed tickets or retrying a previously-rejected fix.
 
 ### Example
 
 ```bash
-python run.py mando222/my-project --all
-python run.py mando222/my-project 42 67 100        # three issues in parallel
-python run.py mando222/my-project 55 --force       # reopen and retry a closed issue
+python run.py epowell101/githubFixer --all
+python run.py epowell101/githubFixer 42 67 100        # three issues in parallel
+python run.py epowell101/githubFixer 55 --force       # reopen and retry a closed issue
 ```
 
 ### Parallel execution
@@ -79,8 +79,8 @@ Whether you pass `--all` or explicit issue numbers, all selected issues are disp
 The pipeline will run fully autonomously for each issue:
 1. Analyze the codebase
 2. Write and review a spec
-3. Break the work into tasks and create Linear sub-issues
+3. Break the work into tasks and create GitHub tracking sub-issues
 4. Implement each task, run tests, and self-correct up to 12 cycles
 5. Review the implementation against the spec
 6. Open a PR on GitHub
-7. Mark the Linear ticket "In Review" with the PR link
+7. Mark the GitHub tracking issue "In Review" with the PR link
