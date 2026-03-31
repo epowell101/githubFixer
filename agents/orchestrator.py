@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from agents.definitions import AGENT_MODELS
 from config import settings
-from linear_client import LinearState, LinearTask, get_linear_client
+from github_tracker import LinearState, LinearTask, get_linear_client
 from prompts import load_prompt
 from security import bash_security_hook
 from workspace import issue_workspace
@@ -86,13 +86,13 @@ def _tool_summary(name: str, inp: dict) -> str:
 # Serialize Linear project creation per repo so parallel plan() calls for issues
 # in the same repo don't each create a duplicate project (race condition).
 # Mirrors the _base_clone_locks pattern in workspace.py.
-_linear_project_locks: dict[str, asyncio.Lock] = {}
+_github_project_locks: dict[str, asyncio.Lock] = {}
 
 
-def _linear_project_lock(repo_full_name: str) -> asyncio.Lock:
-    if repo_full_name not in _linear_project_locks:
-        _linear_project_locks[repo_full_name] = asyncio.Lock()
-    return _linear_project_locks[repo_full_name]
+def _github_project_lock(repo_full_name: str) -> asyncio.Lock:
+    if repo_full_name not in _github_project_locks:
+        _github_project_locks[repo_full_name] = asyncio.Lock()
+    return _github_project_locks[repo_full_name]
 
 
 # --------------------------------------------------------------------------- #
