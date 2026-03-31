@@ -609,7 +609,7 @@ class IssueWorkflow:
             analysis_task = asyncio.create_task(
                 self._run_codebase_analyzer(self._prompt_analyze_codebase())
             )
-            async with _linear_project_lock(self.event.repo_full_name):
+            async with _github_project_lock(self.event.repo_full_name):
                 self.linear_issue_id, self.linear_project_id = await self._linear.create_issue(
                     title=f"[Auto] #{self.event.number}: {self.event.title}",
                     description=f"{self.event.body or ''}\n\nGitHub Issue: {self.event.html_url}",
