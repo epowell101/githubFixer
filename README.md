@@ -1,13 +1,12 @@
 # githubFixer
 
-Automatically resolves GitHub issues using a multi-agent Claude pipeline. Point it at a repo, and it analyzes each issue, writes a spec, plans tasks, codes the fix, runs tests, opens a PR, and tracks everything in Linear.
+Automatically resolves GitHub issues using a multi-agent Claude pipeline. Point it at a repo, and it analyzes each issue, writes a spec, plans tasks, codes the fix, runs tests, opens a PR, and tracks everything in GitHub.
 
 ## Prerequisites
 
 - Python 3.11+
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`)
-- A [Linear](https://linear.app) workspace with an API key
 
 ## Installation
 
