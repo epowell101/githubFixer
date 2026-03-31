@@ -19,22 +19,13 @@ from workspace import issue_workspace
 if TYPE_CHECKING:
     from models import IssueEvent
 
-try:
-    from claude_agent_sdk import (  # type: ignore[import]
-        AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
-        ResultMessage, RateLimitEvent,
-    )
-    from claude_agent_sdk.types import (  # type: ignore[import]
-        HookCallback, HookMatcher, TextBlock,
-    )
-except ImportError:
-    from anthropic.claude_agent_sdk import (  # type: ignore[import]
-        AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
-        ResultMessage, RateLimitEvent,
-    )
-    from anthropic.claude_agent_sdk.types import (  # type: ignore[import]
-        HookCallback, HookMatcher, TextBlock,
-    )
+from claude_code_sdk import (
+    AssistantMessage, ClaudeCodeOptions, ClaudeSDKClient,
+    ResultMessage,
+)
+from claude_code_sdk.types import (
+    HookCallback, HookMatcher, TextBlock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +134,10 @@ def _make_agent_client(
     hooks: dict | None = None,
 ) -> ClaudeSDKClient:
     return ClaudeSDKClient(
-        options=ClaudeAgentOptions(
+        options=ClaudeCodeOptions(
             system_prompt=system_prompt,
             model=model,
-            tools=tools,
+            allowed_tools=tools,
             cwd=str(repo_path),
             settings=str(settings_file.resolve()),
             mcp_servers=mcp_servers or {},
@@ -198,9 +189,9 @@ async def _run_agent(client: ClaudeSDKClient, task_prompt: str, label: str = "")
                     is_error = getattr(message, "is_error", False)
                     if is_error and label:
                         alog.debug("[%s] TOOL_RESULT: ERROR", issue_ref)
-                elif isinstance(message, RateLimitEvent):
+                else:
                     if label:
-                        alog.debug("[%s] RATE_LIMIT event", issue_ref)
+                        alog.debug("[%s] stream event: %s", issue_ref, type(message).__name__)
     except Exception as exc:
         elapsed = time.monotonic() - start
         if label:

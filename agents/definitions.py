@@ -5,11 +5,16 @@ from typing import Literal
 from config import settings
 from prompts import load_prompt
 
-# claude_agent_sdk import — adjust if the package name differs on install
-try:
-    from claude_agent_sdk import AgentDefinition  # type: ignore[import]
-except ImportError:
-    from anthropic.types.beta import AgentDefinition  # type: ignore[import]
+from dataclasses import dataclass, field
+
+
+@dataclass
+class AgentDefinition:
+    """Definition for a sub-agent with its configuration."""
+    description: str = ""
+    prompt: str = ""
+    tools: list[str] = field(default_factory=list)
+    model: str = "inherit"
 
 ModelShortname = Literal["sonnet", "opus", "haiku", "inherit"]
 

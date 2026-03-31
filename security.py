@@ -12,8 +12,9 @@ import os
 import re
 import shlex
 
-from claude_agent_sdk import PreToolUseHookInput  # type: ignore[import]
-from claude_agent_sdk.types import HookContext, SyncHookJSONOutput  # type: ignore[import]
+from typing import Any
+
+from claude_code_sdk.types import HookContext, HookJSONOutput
 
 
 ALLOWED_BASE_COMMANDS: set[str] = {
@@ -139,10 +140,10 @@ def validate_bash_command(command: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 async def bash_security_hook(
-    input_data: PreToolUseHookInput,
+    input_data: dict[str, Any],
     tool_use_id: str | None = None,
     context: HookContext | None = None,
-) -> SyncHookJSONOutput:
+) -> HookJSONOutput:
     """PreToolUse hook: validate Bash commands against the allowlist."""
     if input_data.get("tool_name") != "Bash":
         return {}
@@ -153,8 +154,8 @@ async def bash_security_hook(
 
     allowed, reason = validate_bash_command(command)
     if not allowed:
-        return SyncHookJSONOutput(
-            decision="block",
-            reason=f"Security policy blocked: {reason}. Command: {command!r}",
-        )
+        return {
+            "decision": "block",
+            "systemMessage": f"Security policy blocked: {reason}. Command: {command!r}",
+        }
     return {}
