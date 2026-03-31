@@ -7,14 +7,15 @@ Automatically resolves GitHub issues using a multi-agent Claude pipeline. Point 
 - Python 3.11+
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`)
+- A GitHub personal access token with Issues, Contents, and Pull Requests read/write permissions
 
 ## Installation
 
 ```bash
-git clone https://github.com/mando222/githubFixer.git
+git clone https://github.com/epowell101/githubFixer.git
 cd githubFixer
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -22,8 +23,9 @@ Create a `.env` file in the project root:
 
 ```env
 # Required
-LINEAR_API_KEY=lin_api_...
-LINEAR_TEAM_ID=your-team-id
+GITHUB_TOKEN=ghp_...
+GITHUB_REPO=owner/repo
+ANTHROPIC_API_KEY=sk-ant-...
 
 # Optional — override default models
 # CODING_AGENT_MODEL=claude-opus-4-6
@@ -33,14 +35,12 @@ LINEAR_TEAM_ID=your-team-id
 # MAX_CONCURRENT_ISSUES=3
 ```
 
-Claude authentication is handled through the Claude Code CLI — no API key needed here. Make sure you're logged in (`claude`) before running.
-
-To find your Linear Team ID: go to Linear → Settings → API → scroll to "Team IDs".
+Create your GitHub token at: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. It needs read/write permissions for Issues, Contents, and Pull Requests on the target repo.
 
 ## Usage
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 
 # Interactive picker — lists open issues, you choose which to solve
 python run.py owner/repo
@@ -62,14 +62,14 @@ python run.py owner/repo --all --force
 
 ### `--force`
 
-By default the pipeline skips issues whose Linear state is `Cancelled` or `Won't Implement`. Pass `--force` to override that check — the issue is reactivated to *In Progress* and the full pipeline runs regardless of its current state. Useful for revisiting deliberately-closed tickets or retrying a previously-rejected fix.
+By default the pipeline skips issues whose GitHub tracking state is `Cancelled` or `Won't Implement`. Pass `--force` to override that check — the issue is reactivated to *In Progress* and the full pipeline runs regardless of its current state. Useful for revisiting deliberately-closed tickets or retrying a previously-rejected fix.
 
 ### Example
 
 ```bash
-python run.py mando222/my-project --all
-python run.py mando222/my-project 42 67 100        # three issues in parallel
-python run.py mando222/my-project 55 --force       # reopen and retry a closed issue
+python run.py epowell101/my-project --all
+python run.py epowell101/my-project 42 67 100        # three issues in parallel
+python run.py epowell101/my-project 55 --force       # reopen and retry a closed issue
 ```
 
 ### Parallel execution
@@ -79,8 +79,8 @@ Whether you pass `--all` or explicit issue numbers, all selected issues are disp
 The pipeline will run fully autonomously for each issue:
 1. Analyze the codebase
 2. Write and review a spec
-3. Break the work into tasks and create Linear sub-issues
+3. Break the work into tasks and create GitHub sub-issues
 4. Implement each task, run tests, and self-correct up to 12 cycles
 5. Review the implementation against the spec
 6. Open a PR on GitHub
-7. Mark the Linear ticket "In Review" with the PR link
+7. Mark the GitHub tracking issue "In Review" with the PR link
